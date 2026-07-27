@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hmac
 from collections import defaultdict
+from collections.abc import Sequence
 from datetime import UTC
 
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select
 from sqlalchemy.orm import Session, selectinload
 
 from fire_viewer.core.config import Settings
@@ -272,34 +273,43 @@ def get_public_incident_view(
         )
         for source_id, source in sorted(source_rows.items(), key=lambda item: item[1].source_key)
     ]
-    bulletin_entries = (
-        session.execute(
-            select(IncidentBulletinEntry)
-            .where(
-                IncidentBulletinEntry.incident_id == incident.id,
-                IncidentBulletinEntry.state == "PUBLISHED",
+    bulletin_entries: Sequence[IncidentBulletinEntry] = []
+    bulletin_sources: Sequence[Source] = []
+    # ``d8f3a1c5b720`` was inserted into an already deployed migration chain.
+    # A database stamped at the later historical head can therefore legitimately
+    # lack this additive table until the forward repair migration is applied.
+    # Keep the existing public bulletin readable during that controlled rollout:
+    # an absent optional table means "no administrator-authored entries", never a
+    # failed incident page or an invented replacement value.
+    if inspect(session.get_bind()).has_table(IncidentBulletinEntry.__tablename__):
+        bulletin_entries = (
+            session.execute(
+                select(IncidentBulletinEntry)
+                .where(
+                    IncidentBulletinEntry.incident_id == incident.id,
+                    IncidentBulletinEntry.state == "PUBLISHED",
+                )
+                .order_by(
+                    IncidentBulletinEntry.effective_at.desc(),
+                    IncidentBulletinEntry.entry_id.asc(),
+                )
             )
-            .order_by(
-                IncidentBulletinEntry.effective_at.desc(),
-                IncidentBulletinEntry.entry_id.asc(),
-            )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
-    bulletin_sources = (
-        session.execute(
-            select(Source)
-            .join(IncidentBulletinEntry, IncidentBulletinEntry.source_id == Source.id)
-            .where(
-                IncidentBulletinEntry.incident_id == incident.id,
-                IncidentBulletinEntry.state == "PUBLISHED",
-                Source.enabled.is_(True),
+        bulletin_sources = (
+            session.execute(
+                select(Source)
+                .join(IncidentBulletinEntry, IncidentBulletinEntry.source_id == Source.id)
+                .where(
+                    IncidentBulletinEntry.incident_id == incident.id,
+                    IncidentBulletinEntry.state == "PUBLISHED",
+                    Source.enabled.is_(True),
+                )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
     for source in bulletin_sources:
         source_rows.setdefault(source.id, source)
         source_counts.setdefault(source.id, 0)

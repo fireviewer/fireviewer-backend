@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sqlalchemy import text
+
 from fire_viewer.core.security import Actor
 from fire_viewer.db.models import (
     IncidentGalleryItem,
@@ -99,6 +101,24 @@ def test_public_view_filters_sensitive_observation_fields_and_supports_etag(
         "occurred_at"
         in client.get(f"/api/v1/incident/{incident.fire_id}/public-view/timeline.csv").text
     )
+
+
+def test_public_view_remains_readable_during_additive_bulletin_table_rollout(
+    client, seed_incident, session
+) -> None:
+    incident, _episode = seed_incident(
+        fire_id="FR-83-00609",
+        sequence=609,
+        lon=6.04,
+        lat=43.31,
+    )
+    session.execute(text("DROP TABLE incident_bulletin_entry"))
+    session.commit()
+
+    response = client.get(f"/api/v1/incident/{incident.fire_id}/public-view")
+
+    assert response.status_code == 200
+    assert response.json()["fire_id"] == incident.fire_id
 
 
 def test_public_report_is_deduplicated_and_never_changes_public_view(client, seed_incident) -> None:
