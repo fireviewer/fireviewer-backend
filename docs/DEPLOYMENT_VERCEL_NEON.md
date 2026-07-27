@@ -27,7 +27,7 @@ Le JSON attendu contient :
 {
   "status": "ready",
   "database": "ok",
-  "schema_revision": "ca3d7e9f2b61",
+  "schema_revision": "db7c2e4f9a10",
   "spatial_index": "ok"
 }
 ```
@@ -97,7 +97,7 @@ Définir séparément les valeurs **Preview** et **Production** :
 ```text
 FV_ENVIRONMENT=production
 FV_DATABASE_URL=<connexion Neon poolée>
-FV_DATABASE_SCHEMA_REVISION=ca3d7e9f2b61
+FV_DATABASE_SCHEMA_REVISION=db7c2e4f9a10
 FV_DATABASE_POOL_SIZE=2
 FV_DATABASE_MAX_OVERFLOW=3
 FV_OBJECT_STORAGE_BACKEND=vercel_blob

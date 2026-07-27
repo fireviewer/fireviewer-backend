@@ -15,7 +15,7 @@ PRE_NORMALIZATION_REVISION = "f3b8c1d7a920"
 NORMALIZATION_REVISION = "a4e9c2f7d610"
 PRE_SOURCE_INGESTION_REVISION = "e1c7a9b4d620"
 SOURCE_INGESTION_REVISION = "f9c8b7a6d510"
-CURRENT_SCHEMA_REVISION = "ca3d7e9f2b61"
+CURRENT_SCHEMA_REVISION = "db7c2e4f9a10"
 
 
 def test_runtime_and_vercel_expect_the_current_schema_revision() -> None:
@@ -39,6 +39,36 @@ def _foreign_key(inspector, table: str, column: str) -> dict:
         for constraint in inspector.get_foreign_keys(table)
         if constraint["constrained_columns"] == [column]
     )
+
+
+def test_forward_repair_creates_bulletin_table_for_already_stamped_database(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "legacy-stamped-without-bulletin.db"
+    config = _config(database_path)
+    command.upgrade(config, "ca3d7e9f2b61")
+
+    engine = create_engine(f"sqlite:///{database_path}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("DROP TABLE incident_bulletin_entry"))
+        assert not inspect(engine).has_table("incident_bulletin_entry")
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = create_engine(f"sqlite:///{database_path}")
+    try:
+        repaired = inspect(engine)
+        assert repaired.has_table("incident_bulletin_entry")
+        with engine.connect() as connection:
+            revision = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+        assert revision == CURRENT_SCHEMA_REVISION
+    finally:
+        engine.dispose()
 
 
 def test_normalization_migration_resolves_all_three_autogenerate_drifts(tmp_path: Path) -> None:
