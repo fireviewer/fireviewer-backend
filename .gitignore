@@ -17,6 +17,7 @@ build/
 .env
 data/*
 !data/.gitkeep
+artifacts/
 .vercel
 backups/
 exports/
