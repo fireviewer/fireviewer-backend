@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "git": {
+    "deploymentEnabled": false
+  },
+  "buildCommand": "uv run --frozen --no-sync alembic upgrade head",
+  "env": {
+    "FV_DATABASE_SCHEMA_REVISION": "d8f3a1c5b720"
+  },
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60
+    }
+  }
+}

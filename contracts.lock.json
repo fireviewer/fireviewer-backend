@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "contracts": [
+    {
+      "producer": "fireviewer/fireviewer-ai-worker",
+      "tag": "v0.1.0",
+      "path": "contracts/agent-worker/v2/examples/valid-input.json",
+      "sha256": "466ff98d2a240375bdf4cfe55db8054bcf5d4b20afbec6ef13c58b60450324ba"
+    },
+    {
+      "producer": "fireviewer/fireviewer-ai-worker",
+      "tag": "v0.1.0",
+      "path": "contracts/agent-worker/v2/examples/valid-output.json",
+      "sha256": "7353364e293673e21812e126d7011d80a684f366323c03865a3359a7e4723e17"
+    },
+    {
+      "producer": "fireviewer/fireviewer-spatial",
+      "tag": "v0.1.0",
+      "path": "contracts/spatial/v1/spatial-contract.schema.json",
+      "sha256": "be615a44376d7cfb7d9116951f4ce41ea9eb3a6ba6d5f4264a1ee218c8487723"
+    }
+  ]
+}

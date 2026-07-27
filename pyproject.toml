@@ -1,0 +1,97 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fire-viewer-backend"
+version = "0.1.0"
+description = "Incident-centric backend foundation for Fire-Viewer"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "Fire-Viewer contributors" }]
+dependencies = [
+  "fastapi==0.128.2",
+  "httpx==0.28.1",
+  "uvicorn[standard]==0.48.0",
+  "SQLAlchemy==2.0.50",
+  "alembic==1.18.4",
+  "pydantic==2.13.4",
+  "pydantic-settings==2.14.1",
+  "psycopg[binary]==3.3.4",
+  "vercel==0.7.0",
+  "PyJWT[crypto]==2.13.0",
+  "prometheus-client==0.25.0",
+  "pyproj==3.7.2",
+  "shapely==2.1.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx==0.28.1",
+  "jsonschema==4.25.1",
+  "pytest==9.0.2",
+  "pytest-cov==7.0.0",
+  "ruff==0.15.21",
+  "mypy==2.2.0",
+]
+
+[project.scripts]
+fire-viewer-seed = "fire_viewer.scripts.seed_demo:main"
+fire-viewer-export-openapi = "fire_viewer.scripts.export_openapi:main"
+fire-viewer-backup = "fire_viewer.scripts.backup_sqlite:main"
+fire-viewer-restore = "fire_viewer.scripts.restore_sqlite:main"
+fire-viewer-check-migrations = "fire_viewer.scripts.check_migrations:main"
+fire-viewer-hash-admin-password = "fire_viewer.scripts.hash_admin_password:main"
+fire-viewer-agent-dispatcher = "fire_viewer.scripts.run_agent_dispatcher:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+[tool.setuptools.package-data]
+fire_viewer = ["py.typed", "data/proj/*.tif"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --strict-config --cov=fire_viewer --cov-report=term-missing:skip-covered"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["fire_viewer"]
+omit = ["*/scripts/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 80
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S", "ASYNC"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S108"]
+"migrations/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+packages = ["fire_viewer"]
+warn_unused_ignores = true
+exclude = ["migrations/"]
+
+[[tool.mypy.overrides]]
+module = ["prometheus_client.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["shapely.*"]
+ignore_missing_imports = true

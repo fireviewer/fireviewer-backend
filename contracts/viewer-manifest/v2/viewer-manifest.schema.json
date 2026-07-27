@@ -1,0 +1,439 @@
+{
+  "$defs": {
+    "AssetLod": {
+      "enum": [
+        "mobile",
+        "desktop",
+        "close",
+        "local",
+        "extended"
+      ],
+      "title": "AssetLod",
+      "type": "string"
+    },
+    "IncidentStatus": {
+      "enum": [
+        "CANDIDATE",
+        "UNDER_REVIEW",
+        "ACTIVE_CONFIRMED",
+        "MONITORING",
+        "EXTINGUISHED",
+        "CLOSED",
+        "SUSPENDED",
+        "REJECTED"
+      ],
+      "title": "IncidentStatus",
+      "type": "string"
+    },
+    "ManifestAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "integer"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "lod": {
+          "$ref": "#/$defs/AssetLod"
+        }
+      },
+      "required": [
+        "asset_id",
+        "version",
+        "url",
+        "sha256",
+        "size_bytes",
+        "lod"
+      ],
+      "title": "ManifestAsset",
+      "type": "object"
+    },
+    "ManifestFrame": {
+      "additionalProperties": false,
+      "properties": {
+        "origin_wgs84": {
+          "maxItems": 3,
+          "minItems": 3,
+          "prefixItems": [
+            {
+              "maximum": 180.0,
+              "minimum": -180.0,
+              "type": "number"
+            },
+            {
+              "maximum": 90.0,
+              "minimum": -90.0,
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Origin Wgs84",
+          "type": "array"
+        },
+        "local_frame": {
+          "const": "ENU",
+          "title": "Local Frame",
+          "type": "string"
+        },
+        "meters_per_unit": {
+          "const": 0.01,
+          "title": "Meters Per Unit",
+          "type": "number"
+        },
+        "vertical_datum": {
+          "const": "EPSG:4979",
+          "title": "Vertical Datum",
+          "type": "string"
+        }
+      },
+      "required": [
+        "origin_wgs84",
+        "local_frame",
+        "meters_per_unit",
+        "vertical_datum"
+      ],
+      "title": "ManifestFrame",
+      "type": "object"
+    },
+    "ManifestFreshness": {
+      "additionalProperties": false,
+      "properties": {
+        "incident_at": {
+          "format": "date-time",
+          "title": "Incident At",
+          "type": "string"
+        },
+        "terrain_source_year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Terrain Source Year"
+        },
+        "generated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Generated At"
+        }
+      },
+      "required": [
+        "incident_at"
+      ],
+      "title": "ManifestFreshness",
+      "type": "object"
+    },
+    "ManifestSpatialScene": {
+      "additionalProperties": false,
+      "properties": {
+        "package_id": {
+          "maxLength": 96,
+          "minLength": 3,
+          "title": "Package Id",
+          "type": "string"
+        },
+        "catalog_url": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Catalog Url",
+          "type": "string"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/ManifestSpatialSceneFile"
+          },
+          "maxItems": 2000,
+          "minItems": 1,
+          "title": "Files",
+          "type": "array"
+        }
+      },
+      "required": [
+        "package_id",
+        "catalog_url",
+        "files"
+      ],
+      "title": "ManifestSpatialScene",
+      "type": "object"
+    },
+    "ManifestSpatialSceneFile": {
+      "additionalProperties": false,
+      "properties": {
+        "file_id": {
+          "minimum": 1,
+          "title": "File Id",
+          "type": "integer"
+        },
+        "path": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SpatialPackageFileKind"
+        },
+        "url": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "exclusiveMinimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "media_type": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Media Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_id",
+        "path",
+        "kind",
+        "url",
+        "sha256",
+        "size_bytes",
+        "media_type"
+      ],
+      "title": "ManifestSpatialSceneFile",
+      "type": "object"
+    },
+    "ManifestStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/IncidentStatus"
+        },
+        "validated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Validated At"
+        },
+        "review_required": {
+          "title": "Review Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "review_required"
+      ],
+      "title": "ManifestStatus",
+      "type": "object"
+    },
+    "PointGeometryInput": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "Point",
+          "default": "Point",
+          "title": "Type",
+          "type": "string"
+        },
+        "coordinates": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Coordinates",
+          "type": "array"
+        },
+        "horizontal_uncertainty_m": {
+          "exclusiveMinimum": 0.0,
+          "maximum": 50000.0,
+          "title": "Horizontal Uncertainty M",
+          "type": "number"
+        },
+        "altitude_m": {
+          "anyOf": [
+            {
+              "maximum": 10000.0,
+              "minimum": -500.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Altitude M"
+        },
+        "vertical_datum": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 2,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vertical Datum"
+        }
+      },
+      "required": [
+        "coordinates",
+        "horizontal_uncertainty_m"
+      ],
+      "title": "PointGeometryInput",
+      "type": "object"
+    },
+    "SpatialPackageFileKind": {
+      "enum": [
+        "COG",
+        "JPEG",
+        "PNG",
+        "GLB",
+        "FWTILE",
+        "FWTERRAIN"
+      ],
+      "title": "SpatialPackageFileKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "2.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "fire_id": {
+      "title": "Fire Id",
+      "type": "string"
+    },
+    "episode_id": {
+      "title": "Episode Id",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/ManifestStatus"
+    },
+    "location": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PointGeometryInput"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "asset": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ManifestAsset"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "scene": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ManifestSpatialScene"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "frame": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ManifestFrame"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "freshness": {
+      "$ref": "#/$defs/ManifestFreshness"
+    },
+    "model_state": {
+      "enum": [
+        "available",
+        "not_available",
+        "withheld"
+      ],
+      "title": "Model State",
+      "type": "string"
+    },
+    "public_notice": {
+      "title": "Public Notice",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "fire_id",
+    "episode_id",
+    "status",
+    "location",
+    "freshness",
+    "model_state",
+    "public_notice"
+  ],
+  "title": "ViewerManifest",
+  "type": "object"
+}

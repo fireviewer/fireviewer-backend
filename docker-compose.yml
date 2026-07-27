@@ -1,0 +1,33 @@
+services:
+  database:
+    image: postgis/postgis:17-3.5
+    environment:
+      POSTGRES_DB: fire_viewer
+      POSTGRES_USER: fire_viewer
+      POSTGRES_PASSWORD: fire_viewer_local_only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fire_viewer -d fire_viewer"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - fire_viewer_postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      FV_ENVIRONMENT: development
+      FV_DATABASE_URL: postgresql+psycopg://fire_viewer:fire_viewer_local_only@database:5432/fire_viewer
+      FV_AUTH_MODE: disabled
+      FV_CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000"]'
+      FV_TRUSTED_HOSTS: '["localhost","127.0.0.1","api"]'
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  fire_viewer_postgres:

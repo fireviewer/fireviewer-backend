@@ -1,0 +1,39 @@
+{
+  "schema_version": "2.0",
+  "fire_id": "FR-83-00042",
+  "episode_id": "E03",
+  "status": {
+    "code": "MONITORING",
+    "validated_at": "2026-07-12T08:05:00Z",
+    "review_required": false
+  },
+  "location": {
+    "type": "Point",
+    "coordinates": [2.0, 46.0],
+    "horizontal_uncertainty_m": 250.0,
+    "altitude_m": null,
+    "vertical_datum": null
+  },
+  "asset": {
+    "asset_id": "asset-fixture-0001",
+    "version": 1,
+    "url": "https://assets.example.invalid/fire-viewer/FR-83-00042/E03/v1.glb",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "size_bytes": 123456,
+    "lod": "desktop"
+  },
+  "scene": null,
+  "frame": {
+    "origin_wgs84": [2.0, 46.0, 454.203998565679],
+    "local_frame": "ENU",
+    "meters_per_unit": 0.01,
+    "vertical_datum": "EPSG:4979"
+  },
+  "freshness": {
+    "incident_at": "2026-07-12T08:24:00Z",
+    "terrain_source_year": 2024,
+    "generated_at": "2026-07-12T08:20:00Z"
+  },
+  "model_state": "available",
+  "public_notice": "Données entièrement fictives ; ce service ne remplace pas les secours."
+}

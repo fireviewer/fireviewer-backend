@@ -1,0 +1,117 @@
+{
+  "schema_version": "2.0",
+  "batch_id": "BATCH-SYNTH-2026-07-09-01",
+  "analysis_id": "ANALYSIS-SYNTH-2026-07-09",
+  "status": "succeeded",
+  "retryable": false,
+  "orchestration_contract_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "stage_traces": [
+    {
+      "stage_role": "visual_grounding",
+      "contract_id": "stage.visual_grounding.v1",
+      "sequence": 1,
+      "status": "succeeded",
+      "retryable": false,
+      "preflight": {
+        "phase": "preflight",
+        "decision": "pass",
+        "reason_codes": ["requirements_satisfied"],
+        "available_capabilities": ["image"],
+        "missing_capabilities": [],
+        "downstream_possible": true
+      },
+      "postflight": {
+        "phase": "postflight",
+        "decision": "pass",
+        "reason_codes": ["output_valid"],
+        "available_capabilities": ["visual_grounding"],
+        "missing_capabilities": [],
+        "downstream_possible": true
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "kind": "initial",
+          "status": "succeeded",
+          "started_at": "2026-07-09T22:01:00Z",
+          "finished_at": "2026-07-09T22:01:04Z",
+          "inference_ms": 2800,
+          "peak_vram_bytes": 4294967296
+        }
+      ]
+    }
+  ],
+  "model_runs": [
+    {
+      "model_role": "visual_grounding",
+      "model_id": "microsoft/Florence-2-large-ft",
+      "revision": "4a12a2b54b7016a48a22037fbd62da90cd566f2a",
+      "status": "succeeded",
+      "started_at": "2026-07-09T22:01:00Z",
+      "finished_at": "2026-07-09T22:01:04Z",
+      "load_ms": 1200,
+      "inference_ms": 2800,
+      "peak_vram_bytes": 4294967296
+    }
+  ],
+  "items": [
+    {
+      "input_id": "INPUT-1",
+      "source_annotations": [
+        {
+          "annotation_id": "ANN-1",
+          "evidence_id": "INPUT-1",
+          "evidence_kind": "image",
+          "semantic_anchor": "visible_fire_front_point",
+          "source_point_normalized": [0.62, 0.41],
+          "model_score": 0.82
+        }
+      ],
+      "spatial_proposals": [
+        {
+          "proposal_id": "SP-1",
+          "annotation_id": "ANN-1",
+          "status": "ground_point",
+          "observed_at": "2026-07-09T19:30:00Z",
+          "geometry_origin": "CAMERA_RAYCAST",
+          "longitude": 5.382,
+          "latitude": 44.759,
+          "altitude_m": 812.0,
+          "horizontal_accuracy_m": 24.0,
+          "reference_bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "uncertainty_codes": []
+        }
+      ],
+      "fact_proposals": [
+        {
+          "fact_id": "FACT-1",
+          "input_id": "INPUT-1",
+          "category": "resources",
+          "fact_key": "personnel_engaged",
+          "as_of": "2026-07-09T19:30:00Z",
+          "evidence_kind": "image",
+          "evidence_id": "INPUT-1",
+          "certainty": "explicitly_written",
+          "value_number": 120,
+          "unit": "personnes",
+          "summary": "La source indique 120 personnels engagés."
+        }
+      ],
+      "requires_human_review": true
+    }
+  ],
+  "report_draft": {
+    "title": "Point de situation du 9 juillet 2026",
+    "body_markdown": "## Moyens engagés\n\nLa source indique 120 personnels engagés.",
+    "sections": [
+      {
+        "key": "resources",
+        "heading": "Moyens engagés",
+        "body": "La source indique 120 personnels engagés.",
+        "fact_ids": ["FACT-1"]
+      }
+    ]
+  },
+  "validation_errors": [],
+  "boot_ms": 3500
+}

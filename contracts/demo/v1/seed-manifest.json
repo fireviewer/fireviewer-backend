@@ -1,0 +1,27 @@
+{
+  "schema_version": "2.0",
+  "fire_id": "FR-83-00042",
+  "episode_id": "E03",
+  "status": {
+    "code": "MONITORING",
+    "validated_at": "2026-01-15T08:05:00Z",
+    "review_required": false
+  },
+  "location": {
+    "type": "Point",
+    "coordinates": [2.0, 46.0],
+    "horizontal_uncertainty_m": 250.0,
+    "altitude_m": null,
+    "vertical_datum": null
+  },
+  "asset": null,
+  "scene": null,
+  "frame": null,
+  "freshness": {
+    "incident_at": "2026-01-15T08:24:00Z",
+    "terrain_source_year": null,
+    "generated_at": null
+  },
+  "model_state": "not_available",
+  "public_notice": "Terrain daté; positions et périmètres peuvent être estimés; ce service ne remplace pas les secours. Jeu de données de démonstration entièrement fictif (v1)."
+}

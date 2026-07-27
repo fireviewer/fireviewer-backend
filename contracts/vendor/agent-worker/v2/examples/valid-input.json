@@ -1,0 +1,63 @@
+{
+  "schema_version": "2.0",
+  "batch_id": "BATCH-SYNTH-2026-07-09-01",
+  "batch_type": "external_media",
+  "priority": "scheduled_combined",
+  "analysis_window": {
+    "analysis_id": "ANALYSIS-SYNTH-2026-07-09",
+    "fire_id": "FR-99-00001",
+    "episode_id": "E01",
+    "window_start_at": "2026-07-08T22:00:00Z",
+    "window_end_at": "2026-07-09T22:00:00Z",
+    "local_date": "2026-07-09",
+    "timezone": "Europe/Paris"
+  },
+  "reference_bundle": {
+    "reference_id": "SYNTHETIC-REFERENCE-R1",
+    "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "assets": [
+      {
+        "kind": "terrain_mnt",
+        "working_file_url": "https://media.internal/references/synthetic-mnt.tif",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "crs": "EPSG:2154+EPSG:5720",
+        "resolution_m": 0.5
+      },
+      {
+        "kind": "orthophoto",
+        "working_file_url": "https://media.internal/references/synthetic-ortho.tif",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "crs": "EPSG:2154",
+        "resolution_m": 0.2
+      }
+    ]
+  },
+  "items": [
+    {
+      "input_id": "INPUT-1",
+      "media_type": "image",
+      "working_file_url": "https://media.internal/images/synthetic-001.jpg",
+      "provenance": {
+        "source_key": "PRESS-001",
+        "source_reference_url": "https://press.example/incident-synthetic",
+        "license_identifier": "authorized-free-press-use",
+        "attribution": "Photographe de test",
+        "trust": "partner"
+      },
+      "captured_at": "2026-07-09T19:30:00Z",
+      "camera": {
+        "latitude": 46.000,
+        "longitude": 2.000,
+        "orthometric_height_m": 410.0,
+        "horizontal_accuracy_m": 15.0,
+        "yaw_deg": 35.0,
+        "pitch_deg": 3.0,
+        "roll_deg": 0.0,
+        "horizontal_fov_deg": 68.0,
+        "image_width_px": 1920,
+        "image_height_px": 1080,
+        "pose_origin": "HUMAN_CONFIRMED"
+      }
+    }
+  ]
+}

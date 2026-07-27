@@ -1,0 +1,21 @@
+{
+  "schema_version": "2.0",
+  "fire_id": "FR-83-00042",
+  "episode_id": "E03",
+  "status": {
+    "code": "UNDER_REVIEW",
+    "validated_at": null,
+    "review_required": true
+  },
+  "location": null,
+  "asset": null,
+  "scene": null,
+  "frame": null,
+  "freshness": {
+    "incident_at": "2026-07-12T08:24:00Z",
+    "terrain_source_year": null,
+    "generated_at": null
+  },
+  "model_state": "withheld",
+  "public_notice": "Données entièrement fictives ; la localisation et le modèle sont masqués."
+}
