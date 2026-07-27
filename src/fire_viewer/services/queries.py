@@ -13,6 +13,7 @@ from fire_viewer.db.models import (
     ManifestRevision,
     ModelAsset,
     SpatialPackage,
+    SpatialPackageFile,
     SpatialZoneRevision,
     ZoneArchiveSnapshot,
 )
@@ -37,7 +38,6 @@ from fire_viewer.domain.schemas import (
     ManifestFrame,
     ManifestFreshness,
     ManifestSpatialScene,
-    ManifestSpatialSceneFile,
     ManifestStatus,
     PointGeometryInput,
     ViewerManifest,
@@ -198,7 +198,6 @@ def get_viewer_manifest(
             SpatialZoneRevision.id == ManifestRevision.spatial_zone_revision_id,
         )
         .outerjoin(SpatialPackage, SpatialPackage.id == ManifestRevision.spatial_package_id)
-        .options(selectinload(ManifestRevision.package).selectinload(SpatialPackage.files))
         .where(
             ManifestRevision.incident_id == incident.id,
             ManifestRevision.episode_id == current.id,
@@ -235,7 +234,11 @@ def get_viewer_manifest(
             package is not None
             and package.state == SpatialPackageState.PUBLISHED
             and package.spatial_zone_revision_id == spatial_zone_revision.id
-            and package.files
+            and session.scalar(
+                select(SpatialPackageFile.id)
+                .where(SpatialPackageFile.spatial_package_id == package.id)
+                .limit(1)
+            )
         )
         if not asset_available and not scene_available:
             model_state = "not_available"
@@ -268,21 +271,7 @@ def get_viewer_manifest(
                     scene_payload = ManifestSpatialScene(
                         package_id=package.package_id,
                         catalog_url=f"/api/v1/incident/{incident.fire_id}/spatial-scene/catalog",
-                        files=[
-                            ManifestSpatialSceneFile(
-                                file_id=item.id,
-                                path=str(item.provenance.get("catalog_path", "")),
-                                kind=item.kind,
-                                url=(
-                                    f"/api/v1/incident/{incident.fire_id}/spatial-scene/files/{item.id}"
-                                ),
-                                sha256=item.sha256,
-                                size_bytes=item.size_bytes,
-                                media_type=item.media_type,
-                            )
-                            for item in sorted(package.files, key=lambda row: row.id)
-                            if item.provenance.get("catalog_path")
-                        ],
+                        files=[],
                     )
                 frame_payload = ManifestFrame(
                     origin_wgs84=(

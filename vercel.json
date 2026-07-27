@@ -1,15 +1,25 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "git": {
-    "deploymentEnabled": false
-  },
-  "buildCommand": "uv run --frozen --no-sync alembic upgrade head",
   "env": {
-    "FV_DATABASE_SCHEMA_REVISION": "d8f3a1c5b720"
+    "FV_DATABASE_SCHEMA_REVISION": "ca3d7e9f2b61"
   },
   "functions": {
     "api/index.py": {
       "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/v1/internal/agent-orchestrator/progress",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/v1/internal/agent-orchestrator/contributions",
+      "schedule": "0 */3 * * *"
+    },
+    {
+      "path": "/api/v1/internal/agent-orchestrator/media",
+      "schedule": "0 9,10,21,22 * * *"
+    }
+  ]
 }

@@ -248,7 +248,7 @@ fichier ni téléchargement. Un asset GLB de démonstration vérifiable est repo
 - Le téléversement direct/multipart des gros packages est implémenté ; la recette réelle du package
   de 417 Mo sur le store Blob de production reste à exécuter.
 - La collecte publique, l'antivirus, l'extraction de frames et l'interface de revue des médias restent à raccorder ; les lots privés, preuves de consentement, retraits et dates de purge sont persistés.
-- Le dispatcher RunPod dédié est fourni mais n'a pas été exécuté contre un endpoint de production ; le registre de modèles attendu est configuré par révision.
+- Le dispatcher RunPod est intégré au projet Vercel API sous forme de Crons bornés : preuves utilisateur toutes les 3 h, recherche médiatique à 11 h/23 h Europe/Paris, satellite/points chauds/thermique avec le run de 11 h, et suivi du job actif. Une file globale traite strictement un incendie après l'autre. Son exécution contre l'endpoint de production reste à recetter après configuration des secrets serveur.
 - Les tables historiques `job` et `outbox_event` restent réservées au terrain, aux assets et à l'outbox. Leur runner n'est pas fourni par le dispatcher agentique.
 - Le schéma PostgreSQL/PostGIS est migré par Alembic ; l'import automatisé depuis une base SQLite
   existante reste une phase dédiée.

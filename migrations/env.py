@@ -15,6 +15,23 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
+# The agent runtime owns these private execution structures on the ``ia`` branch.
+# They remain in the shared Alembic history so a public-backend deployment can
+# follow a database that has already processed agent work, but they are not part
+# of the public backend SQLAlchemy metadata and must not be proposed for removal.
+EXTERNAL_AGENT_TABLES = frozenset(
+    {
+        "agent_consensus_result",
+        "agent_model_candidate_run",
+        "agent_stage_run",
+    }
+)
+EXTERNAL_AGENT_COLUMNS = {
+    "agent_situation_report_revision": frozenset(
+        {"published_at", "published_by", "publication_reason"}
+    )
+}
+
 
 def database_url() -> str:
     """Resolve the Alembic target with the same FV_ override as the app."""
@@ -30,8 +47,15 @@ def include_object(
     reflected: bool,
     compare_to: object | None,
 ) -> bool:
-    del _object, reflected, compare_to
-    return not (type_ == "table" and name and name.startswith("incident_series_rtree"))
+    del reflected, compare_to
+    if type_ == "table" and name:
+        return not (name.startswith("incident_series_rtree") or name in EXTERNAL_AGENT_TABLES)
+    if type_ in {"column", "index"} and name:
+        table_name = getattr(getattr(_object, "table", None), "name", None)
+        if table_name == "agent_situation_report_revision" and type_ == "index":
+            return name != "ix_agent_situation_report_revision_published_at"
+        return name not in EXTERNAL_AGENT_COLUMNS.get(table_name, frozenset())
+    return True
 
 
 def run_migrations_offline() -> None:

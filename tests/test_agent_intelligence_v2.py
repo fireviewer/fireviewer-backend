@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import func, select
 
 from fire_viewer.db.models import (
+    ActiveFireZoneRevision,
     AgentAnalysisWindow,
     AgentDeadLetter,
     AgentDispatch,
@@ -17,6 +18,7 @@ from fire_viewer.db.models import (
     Job,
 )
 from fire_viewer.domain.enums import (
+    ActiveFireZoneReviewState,
     AgentAnalysisState,
     AgentDispatchState,
     AgentProposalReviewState,
@@ -57,7 +59,7 @@ def _v2_payload(*, fire_id: str, episode_id: str) -> dict[str, object]:
         "batch_type": "external_media",
         "priority": "scheduled_combined",
         "analysis_window": {
-            "analysis_id": "analysis-synthetic-zone-2026-07-09",
+            "analysis_id": "analysis-die-2026-07-09",
             "fire_id": fire_id,
             "episode_id": episode_id,
             "window_start_at": window_start.isoformat(),
@@ -67,7 +69,7 @@ def _v2_payload(*, fire_id: str, episode_id: str) -> dict[str, object]:
         },
         "purge_after": (now + timedelta(days=2)).isoformat(),
         "reference_bundle": {
-            "reference_id": "synthetic-zone-reference-r1",
+            "reference_id": "die-reference-r1",
             "manifest_sha256": "d" * 64,
             "assets": [
                 {
@@ -80,14 +82,14 @@ def _v2_payload(*, fire_id: str, episode_id: str) -> dict[str, object]:
         },
         "items": [
             {
-                "input_id": "media-synthetic-zone-0001",
+                "input_id": "media-die-0001",
                 "media_type": "image",
-                "working_file_url": "https://localhost/private/synthetic-zone-0001.jpg?signature=test",
+                "working_file_url": "https://localhost/private/die-0001.jpg?signature=test",
                 "media_sha256": "a" * 64,
                 "size_bytes": 4096,
                 "provenance": {
-                    "source_key": "source-test-test-test",
-                    "source_reference_url": "https://example.test/synthetic-zone/source",
+                    "source_key": "press-die-0001",
+                    "source_reference_url": "https://example.test/die/source",
                     "license_identifier": "PRESS-TEST-AUTHORIZED",
                     "attribution": "Source de test",
                     "trust": "unverified",
@@ -95,8 +97,8 @@ def _v2_payload(*, fire_id: str, episode_id: str) -> dict[str, object]:
                 "captured_at": window_start.isoformat(),
                 "article_text": "La source indique 120 personnes engagées.",
                 "camera": {
-                    "latitude": 46.000,
-                    "longitude": 2.000,
+                    "latitude": 44.753,
+                    "longitude": 5.371,
                     "horizontal_accuracy_m": 100,
                     "pose_origin": "USER_DECLARED",
                 },
@@ -105,7 +107,7 @@ def _v2_payload(*, fire_id: str, episode_id: str) -> dict[str, object]:
                     "scopes": ["temporary_storage", "agent_analysis", "human_review"],
                     "terms_version": "firewarning-media-v2",
                     "evidence_sha256": "b" * 64,
-                    "source_reference_url": "https://example.test/synthetic-zone/source",
+                    "source_reference_url": "https://example.test/die/source",
                     "license_identifier": "PRESS-TEST-AUTHORIZED",
                     "granted_at": now.isoformat(),
                 },
@@ -114,7 +116,7 @@ def _v2_payload(*, fire_id: str, episode_id: str) -> dict[str, object]:
     }
 
 
-def _v2_output(*, analysis_id: str = "analysis-synthetic-zone-2026-07-09") -> dict[str, object]:
+def _v2_output(*, analysis_id: str = "analysis-die-2026-07-09") -> dict[str, object]:
     now = datetime.now(UTC)
     return {
         "schema_version": "2.0",
@@ -133,15 +135,15 @@ def _v2_output(*, analysis_id: str = "analysis-synthetic-zone-2026-07-09") -> di
                 "preflight": {
                     "phase": "preflight",
                     "decision": "pass",
-                    "reason_codes": ["requirements_satisfied"],
-                    "available_capabilities": ["image"],
+                    "reason_codes": ["capabilities_available"],
+                    "available_capabilities": ["visual_grounding"],
                     "missing_capabilities": [],
                     "downstream_possible": True,
                 },
                 "postflight": {
                     "phase": "postflight",
                     "decision": "pass",
-                    "reason_codes": ["output_valid"],
+                    "reason_codes": ["output_validated"],
                     "available_capabilities": ["visual_grounding"],
                     "missing_capabilities": [],
                     "downstream_possible": True,
@@ -174,11 +176,11 @@ def _v2_output(*, analysis_id: str = "analysis-synthetic-zone-2026-07-09") -> di
         ],
         "items": [
             {
-                "input_id": "media-synthetic-zone-0001",
+                "input_id": "media-die-0001",
                 "source_annotations": [
                     {
                         "annotation_id": "annotation-fire-0001",
-                        "evidence_id": "media-synthetic-zone-0001",
+                        "evidence_id": "media-die-0001",
                         "evidence_kind": "image",
                         "semantic_anchor": "active_fire_point",
                         "source_point_normalized": [0.43, 0.57],
@@ -192,8 +194,8 @@ def _v2_output(*, analysis_id: str = "analysis-synthetic-zone-2026-07-09") -> di
                         "status": "ground_point",
                         "observed_at": now.isoformat(),
                         "geometry_origin": "CROSS_VIEW_RAYCAST",
-                        "longitude": 2.002,
-                        "latitude": 45.998,
+                        "longitude": 5.369,
+                        "latitude": 44.751,
                         "altitude_m": 825,
                         "horizontal_accuracy_m": 180,
                         "reference_bundle_sha256": "d" * 64,
@@ -208,12 +210,12 @@ def _v2_output(*, analysis_id: str = "analysis-synthetic-zone-2026-07-09") -> di
                 "fact_proposals": [
                     {
                         "fact_id": "fact-resources-0001",
-                        "input_id": "media-synthetic-zone-0001",
+                        "input_id": "media-die-0001",
                         "category": "resources",
                         "fact_key": "teams_engaged",
                         "as_of": now.isoformat(),
                         "evidence_kind": "article_text",
-                        "evidence_id": "media-synthetic-zone-0001",
+                        "evidence_id": "media-die-0001",
                         "certainty": "explicitly_written",
                         "value_number": 120,
                         "unit": "people",
@@ -245,11 +247,11 @@ def _v2_output(*, analysis_id: str = "analysis-synthetic-zone-2026-07-09") -> di
 
 def _create_and_enqueue_v2(client, session, seed_incident) -> AgentDispatch:
     incident, episode = seed_incident(
-        fire_id="FR-99-00001",
+        fire_id="FR-26-00001",
         sequence=1,
-        lon=2.000,
-        lat=46.000,
-        canonical_name="Zone synthétique",
+        lon=5.371,
+        lat=44.753,
+        canonical_name="Die - massif de Justin",
     )
     created = client.post(
         "/api/v2/admin/agent-batches",
@@ -257,7 +259,7 @@ def _create_and_enqueue_v2(client, session, seed_incident) -> AgentDispatch:
         json=_v2_payload(fire_id=incident.fire_id, episode_id=episode.episode_id),
     )
     assert created.status_code == 201, created.text
-    assert created.json()["analysis_id"] == "analysis-synthetic-zone-2026-07-09"
+    assert created.json()["analysis_id"] == "analysis-die-2026-07-09"
     enqueued = client.post("/api/v2/admin/agent-batches/agent-v2-batch-0001/enqueue")
     assert enqueued.status_code == 200, enqueued.text
     dispatch = session.scalar(select(AgentDispatch))
@@ -292,9 +294,7 @@ def test_v2_result_stays_private_and_persists_grounding_abstention_and_report(
 ) -> None:
     dispatch = _create_and_enqueue_v2(client, session, seed_incident)
     assert dispatch.payload["schema_version"] == "2.0"
-    assert (
-        dispatch.payload["analysis_window"]["analysis_id"] == "analysis-synthetic-zone-2026-07-09"
-    )
+    assert dispatch.payload["analysis_window"]["analysis_id"] == "analysis-die-2026-07-09"
     assert dispatch.payload["reference_bundle"]["manifest_sha256"] == "d" * 64
     assert "consent" not in dispatch.payload["items"][0]
     assert session.scalar(select(func.count()).select_from(Job)) == 0
@@ -316,6 +316,13 @@ def test_v2_result_stays_private_and_persists_grounding_abstention_and_report(
     ]
     assert all(proposal.review_state == AgentProposalReviewState.PENDING for proposal in proposals)
     assert session.scalar(select(func.count()).select_from(AgentFactProposal)) == 1
+    zone = session.scalar(select(ActiveFireZoneRevision))
+    assert zone is not None
+    assert zone.analysis_window_id == analysis.id
+    assert zone.geometry_origin == "AGENT_DERIVED"
+    assert zone.review_state.value == "DRAFT"
+    assert zone.supporting_marker_ids == ["proposal:spatial-fire-0001"]
+    assert zone.geometry_geojson["type"] == "MultiPolygon"
     report = session.scalar(select(AgentSituationReportRevision))
     assert report is not None and report.review_state == AgentReportReviewState.DRAFT
     assert session.scalar(select(func.count()).select_from(IncidentSpatialMarker)) == 0
@@ -341,6 +348,50 @@ def test_v2_rejects_output_bound_to_another_analysis_window(
     assert session.scalar(select(func.count()).select_from(AgentFactProposal)) == 0
 
 
+def test_human_edit_keeps_the_agent_analysis_day(
+    client, session, app, settings, seed_incident
+) -> None:
+    _create_and_enqueue_v2(client, session, seed_incident)
+    _run_to_completion(app, session, settings, FakeRunPodV2(_v2_output()))
+
+    proposal = session.scalar(
+        select(AgentSpatialProposal).where(AgentSpatialProposal.status == "ground_point")
+    )
+    analysis = session.scalar(select(AgentAnalysisWindow))
+    zone = session.scalar(select(ActiveFireZoneRevision))
+    assert proposal is not None and analysis is not None and zone is not None
+    reviewed = client.post(
+        f"/api/v1/admin/incidents/FR-26-00001/spatial-markers/proposal:{proposal.proposal_id}/review",
+        json={
+            "action": "validate",
+            "expected_version": proposal.version,
+            "reason": "Point actif et géolocalisation contrôlés dans la preuve source.",
+        },
+    )
+    assert reviewed.status_code == 200, reviewed.text
+
+    edited = client.post(
+        "/api/v1/admin/incidents/FR-26-00001/active-zone-revisions",
+        json={
+            "expected_latest_revision": zone.revision,
+            "valid_at": "2026-07-19T21:00:00Z",
+            "analysis_id": analysis.analysis_id,
+            "geometry_geojson": zone.geometry_geojson,
+            "supporting_marker_ids": [f"proposal:{proposal.proposal_id}"],
+            "reason": "Contour quotidien corrigé manuellement sans changer sa journée d'analyse.",
+        },
+    )
+
+    assert edited.status_code == 201, edited.text
+    assert edited.json()["analysis_id"] == analysis.analysis_id
+    returned_valid_at = datetime.fromisoformat(edited.json()["valid_at"].replace("Z", "+00:00"))
+    assert returned_valid_at.replace(tzinfo=None) == analysis.window_end_at.replace(tzinfo=None)
+    persisted = session.scalar(
+        select(ActiveFireZoneRevision).where(ActiveFireZoneRevision.revision == 2)
+    )
+    assert persisted is not None and persisted.analysis_window_id == analysis.id
+
+
 def test_withdrawing_consent_invalidates_private_v2_results(
     client, session, app, settings, seed_incident
 ) -> None:
@@ -348,7 +399,7 @@ def test_withdrawing_consent_invalidates_private_v2_results(
     _run_to_completion(app, session, settings, FakeRunPodV2(_v2_output()))
 
     response = client.post(
-        "/api/v2/admin/agent-batches/agent-v2-batch-0001/items/media-synthetic-zone-0001/consent/withdraw",
+        "/api/v2/admin/agent-batches/agent-v2-batch-0001/items/media-die-0001/consent/withdraw",
         json={"reason": "Retrait explicite après analyse et avant validation humaine."},
     )
     assert response.status_code == 200, response.text
@@ -360,5 +411,7 @@ def test_withdrawing_consent_invalidates_private_v2_results(
     )
     fact = session.scalar(select(AgentFactProposal))
     report = session.scalar(select(AgentSituationReportRevision))
+    zone = session.scalar(select(ActiveFireZoneRevision))
     assert fact is not None and fact.review_state == AgentProposalReviewState.INVALIDATED
     assert report is not None and report.review_state == AgentReportReviewState.INVALIDATED
+    assert zone is not None and zone.review_state == ActiveFireZoneReviewState.REJECTED

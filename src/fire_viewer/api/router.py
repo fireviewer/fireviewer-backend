@@ -1,12 +1,13 @@
 from fastapi import APIRouter
 
-from fire_viewer.api import admin, discovery, incidents, operator
+from fire_viewer.api import admin, contributions, discovery, incidents, operator
 
 api_router = APIRouter()
 api_router.include_router(incidents.router, prefix="/incident")
 # The discovery endpoints must precede the historical dynamic plural alias,
 # otherwise `/incidents/search` would be interpreted as a fire identifier.
 api_router.include_router(discovery.router)
+api_router.include_router(contributions.router)
 api_router.include_router(
     incidents.router,
     prefix="/incidents",

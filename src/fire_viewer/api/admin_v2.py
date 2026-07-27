@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Header, Path, Response
+from fastapi import APIRouter, Header, Path, Query, Response
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -17,6 +17,12 @@ from fire_viewer.api.dependencies import (
 )
 from fire_viewer.core.security import Actor, require_role
 from fire_viewer.db.models import IncidentSeries, ModelAsset, SpatialPackage, SpatialPackageFile
+from fire_viewer.domain.contribution_schemas import (
+    AdminContributionGalleryProposalRequest,
+    AdminContributionGalleryState,
+    AdminContributionProposalReviewRequest,
+    AdminPublicContributionDetailEnvelope,
+)
 from fire_viewer.domain.errors import ConflictError, NotFoundError
 from fire_viewer.domain.schemas import (
     AdminBlobUploadGrantRequest,
@@ -31,6 +37,11 @@ from fire_viewer.domain.schemas import (
     AdminIncidentSpatialPackageImportResponse,
     AdminOperationalMapResponse,
     AdminWorkQueueResponse,
+)
+from fire_viewer.services.admin_contribution_dossier import (
+    get_admin_public_contribution_detail,
+    propose_contribution_gallery_item,
+    review_contribution_proposal,
 )
 from fire_viewer.services.admin_dashboard import get_admin_dashboard
 from fire_viewer.services.admin_incident_creation import create_admin_incident
@@ -117,10 +128,85 @@ def work_queue(
     response: Response,
     actor: ActorDep,
     session: SessionDep,
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=64),
+    category: Annotated[list[str] | None, Query()] = None,
+    priority: Annotated[list[str] | None, Query()] = None,
 ) -> AdminWorkQueueResponse:
     _require_admin(actor)
     _private_read(response)
-    return get_admin_work_queue(session)
+    return get_admin_work_queue(
+        session,
+        limit=limit,
+        cursor=cursor,
+        categories=set(category or []) or None,
+        priorities=set(priority or []) or None,
+    )
+
+
+@router.get(
+    "/public-contributions/{contribution_id}",
+    response_model=AdminPublicContributionDetailEnvelope,
+)
+def public_contribution_detail(
+    contribution_id: str,
+    response: Response,
+    actor: ActorDep,
+    session: SessionDep,
+    settings: SettingsDep,
+    trace_id: TraceIdDep,
+) -> AdminPublicContributionDetailEnvelope:
+    _require_admin(actor)
+    _private_read(response)
+    return get_admin_public_contribution_detail(
+        session, contribution_id=contribution_id, settings=settings, trace_id=trace_id
+    )
+
+
+@router.post("/public-contributions/{contribution_id}/proposals/{kind}/{proposal_id}/review")
+def review_public_contribution_proposal(
+    contribution_id: str,
+    kind: str,
+    proposal_id: str,
+    payload: AdminContributionProposalReviewRequest,
+    response: Response,
+    actor: ActorDep,
+    session: SessionDep,
+    trace_id: TraceIdDep,
+) -> dict[str, bool]:
+    _require_admin(actor)
+    review_contribution_proposal(
+        session,
+        contribution_id=contribution_id,
+        kind=kind,
+        proposal_id=proposal_id,
+        payload=payload,
+        actor=actor,
+        trace_id=trace_id,
+    )
+    _private_read(response)
+    return {"ok": True}
+
+
+@router.post(
+    "/public-contributions/{contribution_id}/gallery-proposal",
+    response_model=AdminContributionGalleryState,
+    status_code=201,
+)
+def propose_public_contribution_gallery(
+    contribution_id: str,
+    payload: AdminContributionGalleryProposalRequest,
+    response: Response,
+    actor: ActorDep,
+    session: SessionDep,
+    trace_id: TraceIdDep,
+) -> AdminContributionGalleryState:
+    _require_admin(actor)
+    result = propose_contribution_gallery_item(
+        session, contribution_id=contribution_id, payload=payload, actor=actor, trace_id=trace_id
+    )
+    _private_read(response)
+    return result
 
 
 @router.get("/incidents", response_model=AdminIncidentListResponse)

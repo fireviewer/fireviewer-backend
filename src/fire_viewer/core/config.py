@@ -1,9 +1,16 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, HttpUrl, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from fire_viewer.core.research_sources import (
+    DEFAULT_RESEARCH_ALLOWED_DOMAINS,
+    DEFAULT_RESEARCH_SEARCH_TEMPLATES,
+    SOURCE_REGISTRY_VERSION,
+)
 
 
 class Settings(BaseSettings):
@@ -24,7 +31,7 @@ class Settings(BaseSettings):
     database_pool_recycle_seconds: int = Field(default=300, ge=30, le=3_600)
     database_statement_timeout_ms: int = Field(default=15_000, ge=1_000, le=120_000)
     database_schema_revision: str = Field(
-        default="d8f3a1c5b720",
+        default="ca3d7e9f2b61",
         pattern=r"^[0-9a-f]{12}$",
     )
     log_level: str = "INFO"
@@ -96,6 +103,10 @@ class Settings(BaseSettings):
     )
     public_report_rate_limit_per_day: int = Field(default=5, ge=1, le=25)
     public_report_hash_secret: str = "development-only-public-report-secret-change-me"  # noqa: S105
+    public_contribution_rate_limit_per_day: int = Field(default=5, ge=1, le=25)
+    public_contribution_max_image_bytes: int = Field(
+        default=15_728_640, ge=1_048_576, le=16_777_216
+    )
     corroboration_min_independent_proofs: int = Field(default=3, ge=3, le=20)
     model_generation_min_area_ha: float = Field(default=500.0, ge=1.0, le=1_000_000.0)
     raw_purge_delay_hours: int = Field(default=24, ge=1, le=24)
@@ -112,8 +123,38 @@ class Settings(BaseSettings):
     agent_execution_timeout_ms: int = Field(default=900_000, ge=5_000, le=604_800_000)
     agent_job_ttl_ms: int = Field(default=3_600_000, ge=10_000, le=604_800_000)
     agent_poll_interval_seconds: int = Field(default=5, ge=2, le=300)
+    public_contribution_agent_interval_seconds: int = Field(default=10_800, ge=900, le=86_400)
     agent_dispatch_lease_seconds: int = Field(default=90, ge=30, le=900)
     agent_dispatch_max_attempts: int = Field(default=3, ge=1, le=10)
+    cron_secret: SecretStr | None = Field(
+        default=None,
+        min_length=32,
+        validation_alias=AliasChoices("FV_CRON_SECRET", "CRON_SECRET"),
+    )
+    agent_source_package_max_files: int = Field(default=500, ge=1, le=5_000)
+    agent_source_package_max_file_bytes: int = Field(
+        default=536_870_912, ge=1_048_576, le=1_073_741_824
+    )
+    agent_source_package_max_total_bytes: int = Field(
+        default=2_147_483_648, ge=1_048_576, le=4_294_967_296
+    )
+    agent_source_package_retention_days: int = Field(default=30, ge=1, le=365)
+    agent_media_proxy_base_url: HttpUrl = HttpUrl("https://localhost")
+    agent_media_signing_secret: SecretStr = SecretStr(
+        "development-only-agent-media-signing-secret-change-me"
+    )
+    agent_research_enabled: bool = False
+    agent_research_source_registry_version: str = Field(
+        default=SOURCE_REGISTRY_VERSION, min_length=3, max_length=64
+    )
+    agent_research_allowed_domains: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_RESEARCH_ALLOWED_DOMAINS)
+    )
+    agent_research_search_templates: dict[str, str] = Field(
+        default_factory=lambda: dict(DEFAULT_RESEARCH_SEARCH_TEMPLATES)
+    )
+    agent_research_max_fetch_bytes: int = Field(default=26_214_400, ge=65_536, le=104_857_600)
+    agent_research_request_timeout_seconds: int = Field(default=20, ge=2, le=120)
 
     @model_validator(mode="after")
     def validate_security(self) -> "Settings":
@@ -151,7 +192,57 @@ class Settings(BaseSettings):
             raise ValueError("Wildcard trusted host is forbidden in production")
         if "*" in self.agent_media_allowed_hosts:
             raise ValueError("Wildcard agent media host is forbidden")
+        normalized_research_domains = [
+            domain.strip().casefold().rstrip(".") for domain in self.agent_research_allowed_domains
+        ]
+        if any(
+            not domain or domain == "*" or "/" in domain for domain in normalized_research_domains
+        ):
+            raise ValueError("Research domains must be explicit host names")
+        if len(normalized_research_domains) != len(set(normalized_research_domains)):
+            raise ValueError("Research domains must be unique")
+        unknown_research_domains = set(normalized_research_domains) - set(
+            DEFAULT_RESEARCH_ALLOWED_DOMAINS
+        )
+        if unknown_research_domains:
+            raise ValueError(
+                "Research domains require an executable source policy: "
+                + ", ".join(sorted(unknown_research_domains))
+            )
+        if self.agent_research_source_registry_version != SOURCE_REGISTRY_VERSION:
+            raise ValueError("Research source registry version must match the executable registry")
+        normalized_search_providers = {
+            domain.strip().casefold().rstrip(".") for domain in self.agent_research_search_templates
+        }
+        if normalized_search_providers & set(normalized_research_domains):
+            raise ValueError("Research providers must be separate from source domains")
+        for domain, template in self.agent_research_search_templates.items():
+            provider = domain.strip().casefold().rstrip(".")
+            parts = urlsplit(template)
+            if (
+                parts.scheme.casefold() != "https"
+                or (parts.hostname or "").casefold().rstrip(".") != provider
+                or parts.username is not None
+                or parts.password is not None
+                or parts.fragment
+                or parts.port not in {None, 443}
+                or template.count("{query}") != 1
+            ):
+                raise ValueError("Research search templates must be strict HTTPS templates")
+        if self.agent_source_package_max_total_bytes < self.agent_source_package_max_file_bytes:
+            raise ValueError("Source package total size must cover one maximum-size file")
+        if self.environment in {"staging", "production"}:
+            if self.agent_media_proxy_base_url.scheme != "https":
+                raise ValueError("agent_media_proxy_base_url must use HTTPS")
+            if len(self.agent_media_signing_secret.get_secret_value()) < 32:
+                raise ValueError("agent_media_signing_secret must contain at least 32 characters")
+        if self.agent_research_enabled and not normalized_research_domains:
+            raise ValueError("At least one research domain is required when research is enabled")
+        if self.agent_research_enabled and not normalized_search_providers:
+            raise ValueError("At least one research search provider is required when enabled")
         if self.agent_dispatch_enabled:
+            if self.environment in {"staging", "production"} and not self.cron_secret:
+                raise ValueError("cron_secret is required for hosted agent orchestration")
             if self.agent_runpod_transport == "pod" and (
                 not self.agent_runpod_pod_base_url or not self.agent_runpod_pod_auth_token
             ):

@@ -37,7 +37,7 @@ def test_illegal_transition_returns_409_and_is_audited(client, session, payload_
     fire_id = _create_incident(client, payload_factory)
     response = client.post(
         f"/api/v1/operator/incidents/{fire_id}/transitions",
-        headers={"Idempotency-Key": "test-test-test-test"},
+        headers={"Idempotency-Key": "illegal-" + "transition-0001"},
         json={
             "target_status": "EXTINGUISHED",
             "expected_version": _current_episode_version(session, fire_id),

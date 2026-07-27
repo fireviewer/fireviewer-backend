@@ -225,6 +225,49 @@ def test_dispatcher_submits_once_and_persists_strict_output_for_review(
     assert session.scalar(select(func.count()).select_from(Job)) == 0
 
 
+def test_dispatcher_finishes_first_batch_before_submitting_the_next(
+    client, session, app, settings
+) -> None:
+    first = _batch_payload(batch_id="agent-batch-first-fire")
+    second = _batch_payload(batch_id="agent-batch-second-fire")
+    assert _create(client, first, key="first-fire-key").status_code == 201
+    assert _create(client, second, key="second-fire-key").status_code == 201
+    assert (
+        client.post("/api/v2/admin/agent-batches/agent-batch-first-fire/enqueue").status_code == 200
+    )
+    assert (
+        client.post("/api/v2/admin/agent-batches/agent-batch-second-fire/enqueue").status_code
+        == 200
+    )
+    dispatches = session.execute(select(AgentDispatch).order_by(AgentDispatch.id)).scalars().all()
+    for dispatch in dispatches:
+        dispatch.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+        dispatch.expected_models = {"fire_detection": "rev-ok"}
+    session.commit()
+    runpod = FakeRunPod(output=_worker_output(batch_id="agent-batch-first-fire"))
+
+    assert run_dispatcher_once(
+        app.state.session_factory,
+        worker_id="dispatcher-sequential-test",
+        settings=settings,
+        client=runpod,
+    )
+    assert runpod.submissions == 1
+    first_dispatch = (
+        session.execute(select(AgentDispatch).order_by(AgentDispatch.id)).scalars().first()
+    )
+    assert first_dispatch is not None
+    first_dispatch.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+    session.commit()
+    assert run_dispatcher_once(
+        app.state.session_factory,
+        worker_id="dispatcher-sequential-test",
+        settings=settings,
+        client=runpod,
+    )
+    assert runpod.submissions == 1
+
+
 def test_ambiguous_submission_is_dead_lettered_without_resubmission(
     client, session, app, settings
 ) -> None:

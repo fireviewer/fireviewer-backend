@@ -15,7 +15,7 @@ from fire_viewer.domain.spatial import RAF20_GRID_SHA256
 
 
 def seed_zone(session: Session) -> None:
-    zone = SpatialZone(zone_id="SYNTHETIC-ZONE-01", label="Zone forestière synthétique")
+    zone = SpatialZone(zone_id="DIE-PONTAIX-08", label="Die-Pontaix")
     session.add(zone)
     session.flush()
     revision = SpatialZoneRevision(
@@ -37,11 +37,11 @@ def seed_zone(session: Session) -> None:
     session.add(revision)
     session.flush()
     package = SpatialPackage(
-        package_id="pkg-synthetic-zone-private-preview",
-        manifest_uri="s3://private-admin/pkg-synthetic-zone/manifest.json",
+        package_id="pkg-die-pontaix-private-preview",
+        manifest_uri="s3://private-admin/pkg-die-pontaix/manifest.json",
         manifest_sha256="a" * 64,
         manifest_size_bytes=512,
-        storage_uri="s3://private-admin/pkg-synthetic-zone/",
+        storage_uri="s3://private-admin/pkg-die-pontaix/",
         state=SpatialPackageState.DRAFT,
         provenance={"pipeline": "unity-export"},
         verification_report={},
@@ -49,7 +49,7 @@ def seed_zone(session: Session) -> None:
         files=[
             SpatialPackageFile(
                 kind=SpatialPackageFileKind.GLB,
-                uri="s3://private-admin/pkg-synthetic-zone/model.glb",
+                uri="s3://private-admin/pkg-die-pontaix/model.glb",
                 sha256="b" * 64,
                 size_bytes=1024,
                 media_type="model/gltf-binary",
@@ -80,8 +80,8 @@ def test_admin_zones_list_and_detail_are_available_to_administrators(client) -> 
     created = client.post(
         "/api/v1/admin/zones",
         json={
-            "zone_id": "SYNTHETIC-ZONE-01",
-            "label": "Zone forestière synthétique",
+            "zone_id": "DIE-PONTAIX-08",
+            "label": "Die-Pontaix",
             "description": "Zone locale administrée pour les essais d'API.",
             "bounds_l93_m": [900_000.0, 6_400_000.0, 901_000.0, 6_401_000.0],
             "reason": "Création de la zone d'essai administrateur.",
@@ -92,8 +92,8 @@ def test_admin_zones_list_and_detail_are_available_to_administrators(client) -> 
     assert created.status_code == 201
     assert created.headers["Cache-Control"] == "no-store"
     assert created.json()["zone"] == {
-        "zone_id": "SYNTHETIC-ZONE-01",
-        "label": "Zone forestière synthétique",
+        "zone_id": "DIE-PONTAIX-08",
+        "label": "Die-Pontaix",
         "description": "Zone locale administrée pour les essais d'API.",
         "visibility": "DRAFT",
         "bounds_l93_m": [900_000.0, 6_400_000.0, 901_000.0, 6_401_000.0],
@@ -117,7 +117,7 @@ def test_admin_zones_list_and_detail_are_available_to_administrators(client) -> 
     assert listed_zone["created_at"]
     assert listed_zone["updated_at"]
 
-    detail = client.get("/api/v1/admin/zones/SYNTHETIC-ZONE-01")
+    detail = client.get("/api/v1/admin/zones/DIE-PONTAIX-08")
     assert detail.status_code == 200
     assert detail.headers["Cache-Control"] == "no-store"
     assert detail.json()["uploads"] == []
@@ -136,17 +136,17 @@ def test_admin_private_preview_exposes_metadata_without_private_file_locations(
 ) -> None:
     seed_zone(session)
 
-    revision = client.get("/api/v1/admin/zones/SYNTHETIC-ZONE-01/revisions/1")
+    revision = client.get("/api/v1/admin/zones/DIE-PONTAIX-08/revisions/1")
     assert revision.status_code == 200
     assert revision.headers["Cache-Control"] == "no-store"
 
-    response = client.get("/api/v1/admin/zones/SYNTHETIC-ZONE-01/revisions/1/preview")
+    response = client.get("/api/v1/admin/zones/DIE-PONTAIX-08/revisions/1/preview")
 
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "no-store"
     payload = response.json()
     assert payload["preview_scope"] == "private-admin"
-    assert payload["package_id"] == "pkg-synthetic-zone-private-preview"
+    assert payload["package_id"] == "pkg-die-pontaix-private-preview"
     assert payload["files"] == [
         {
             "file_id": 1,
@@ -170,7 +170,7 @@ def test_admin_zone_missing_resources_return_problem_details(client) -> None:
 
 
 def test_admin_zone_id_requires_the_canonical_uppercase_format(client) -> None:
-    response = client.get("/api/v1/admin/zones/synthetic-zone-08")
+    response = client.get("/api/v1/admin/zones/die-pontaix-08")
 
     assert response.status_code == 422
 

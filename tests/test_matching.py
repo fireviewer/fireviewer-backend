@@ -21,7 +21,7 @@ def test_candidate_overflow_forces_review_even_when_visible_candidates_score_low
         Candidate(
             incident_db_id=1,
             episode_db_id=1,
-            fire_id="FR-99-00002",
+            fire_id="FR-83-00001",
             episode_id="E01",
             reference_lon=7.0,
             reference_lat=44.0,

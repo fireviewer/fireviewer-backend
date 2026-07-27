@@ -8,7 +8,7 @@ from typing import Any
 
 from shapely.geometry import MultiPolygon, Polygon, mapping, shape
 from shapely.ops import unary_union
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from fire_viewer.core.ids import new_prefixed_id
@@ -16,9 +16,12 @@ from fire_viewer.core.security import Actor
 from fire_viewer.core.time import as_utc, ensure_utc, utcnow
 from fire_viewer.db.models import (
     ActiveFireZoneRevision,
+    AgentAnalysisWindow,
     AgentMediaBatch,
     AgentReviewTask,
+    AgentSpatialProposal,
     Episode,
+    IncidentMapCapture,
     IncidentSeries,
     IncidentSpatialMarker,
     ManifestRevision,
@@ -31,6 +34,7 @@ from fire_viewer.db.models import (
 )
 from fire_viewer.domain.enums import (
     ActiveFireZoneReviewState,
+    AgentProposalReviewState,
     AgentReviewState,
     EvidenceSpatialMode,
     IncidentMarkerReviewState,
@@ -59,6 +63,7 @@ from fire_viewer.domain.spatial import (
     wgs84_to_enu,
 )
 from fire_viewer.services.common import record_operator_audit
+from fire_viewer.services.incident_gallery import map_capture_response
 
 
 def _incident_and_episode(session: Session, fire_id: str) -> tuple[IncidentSeries, Episode]:
@@ -250,6 +255,20 @@ def _markers(
         .order_by(IncidentSpatialMarker.observed_at.asc(), IncidentSpatialMarker.marker_id.asc())
         .limit(1_000)
     ).scalars()
+    agent_proposals = session.execute(
+        select(AgentSpatialProposal)
+        .join(
+            AgentAnalysisWindow,
+            AgentAnalysisWindow.id == AgentSpatialProposal.analysis_window_id,
+        )
+        .where(
+            AgentAnalysisWindow.incident_id == incident.id,
+            AgentAnalysisWindow.episode_id == episode.id,
+            AgentSpatialProposal.status == "ground_point",
+        )
+        .order_by(AgentSpatialProposal.observed_at.asc(), AgentSpatialProposal.proposal_id.asc())
+        .limit(1_000)
+    ).scalars()
     result = [
         AdminIncidentSpatialMarker(
             marker_id=f"observation:{item.observation_id}",
@@ -288,6 +307,34 @@ def _markers(
         )
         for item in persisted
     )
+    result.extend(
+        AdminIncidentSpatialMarker(
+            marker_id=f"proposal:{item.proposal_id}",
+            source_kind="agent_media",
+            marker_type="active_fire_point",
+            longitude=float(item.longitude),
+            latitude=float(item.latitude),
+            altitude_m=item.altitude_m,
+            horizontal_accuracy_m=item.horizontal_accuracy_m,
+            geometry_origin=item.geometry_origin or "EXPLICIT_SOURCE_GEOMETRY",
+            review_state=(
+                IncidentMarkerReviewState.VALIDATED.value
+                if item.review_state == AgentProposalReviewState.VALIDATED
+                else IncidentMarkerReviewState.REJECTED.value
+                if item.review_state
+                in {AgentProposalReviewState.REJECTED, AgentProposalReviewState.INVALIDATED}
+                else IncidentMarkerReviewState.PENDING.value
+            ),
+            observed_at=as_utc(item.observed_at) if item.observed_at else None,
+            spatial_display_allowed=False,
+            gltf_position=_gltf_position(
+                float(item.longitude), float(item.latitude), item.altitude_m, origin
+            ),
+            version=item.version,
+        )
+        for item in agent_proposals
+        if item.longitude is not None and item.latitude is not None
+    )
     return result
 
 
@@ -305,6 +352,7 @@ def _zone_response(
         geometry_geojson=item.geometry_geojson,
         gltf_polygons=_project_geometry(item.geometry_geojson, origin),
         geometry_origin=item.geometry_origin,
+        analysis_id=item.analysis_window.analysis_id if item.analysis_window is not None else None,
         supporting_marker_ids=list(item.supporting_marker_ids),
         source_revision_ids=list(item.source_revision_ids),
         review_state=item.review_state,
@@ -349,6 +397,21 @@ def get_spatial_review_workspace(
             .limit(200)
         ).scalars()
     )
+    map_gallery = list(
+        session.scalars(
+            select(IncidentMapCapture)
+            .where(
+                IncidentMapCapture.incident_id == incident.id,
+                IncidentMapCapture.episode_id == episode.id,
+            )
+            .options(selectinload(IncidentMapCapture.active_zone_revision))
+            .order_by(
+                IncidentMapCapture.local_date.desc(),
+                IncidentMapCapture.captured_at.desc(),
+            )
+            .limit(1_000)
+        )
+    )
     return AdminIncidentSpatialReviewWorkspace(
         fire_id=incident.fire_id,
         episode_id=episode.episode_id,
@@ -358,6 +421,7 @@ def get_spatial_review_workspace(
             _zone_response(item, origin=origin, revisions_by_id={row.id: row for row in revisions})
             for item in revisions
         ],
+        map_gallery=[map_capture_response(item, fire_id) for item in map_gallery],
         agent_reviews=[
             AdminAgentReviewPackage(
                 review_id=batch.review_task.review_id,
@@ -408,6 +472,51 @@ def review_marker(
             IncidentSpatialMarker.episode_id == episode.id,
         )
     ).scalar_one_or_none()
+    if marker is None and marker_id.startswith("proposal:"):
+        proposal_id = marker_id.removeprefix("proposal:")
+        proposal = session.execute(
+            select(AgentSpatialProposal)
+            .join(
+                AgentAnalysisWindow,
+                AgentAnalysisWindow.id == AgentSpatialProposal.analysis_window_id,
+            )
+            .where(
+                AgentSpatialProposal.proposal_id == proposal_id,
+                AgentAnalysisWindow.incident_id == incident.id,
+                AgentAnalysisWindow.episode_id == episode.id,
+                AgentSpatialProposal.status == "ground_point",
+            )
+        ).scalar_one_or_none()
+        if proposal is None:
+            raise NotFoundError("agent_spatial_proposal", proposal_id)
+        if proposal.version != payload.expected_version:
+            raise ConflictError("marker_version_conflict", "Marker changed since it was loaded.")
+        proposal.review_state = (
+            AgentProposalReviewState.VALIDATED
+            if payload.action == "validate"
+            else AgentProposalReviewState.REJECTED
+        )
+        proposal.reviewed_by = actor.actor_id
+        proposal.reviewed_at = utcnow()
+        proposal.review_reason = payload.reason
+        proposal.version += 1
+        record_operator_audit(
+            session,
+            actor=actor,
+            action=f"incident.agent_spatial_proposal_{payload.action}",
+            target_type="agent_spatial_proposal",
+            target_id=proposal.proposal_id,
+            reason=payload.reason,
+            trace_id=trace_id,
+            after={"review_state": proposal.review_state.value, "version": proposal.version},
+        )
+        session.commit()
+        _, origin = _scene(session, incident, episode)
+        return next(
+            item
+            for item in _markers(session, incident, episode, origin)
+            if item.marker_id == marker_id
+        )
     if marker is None:
         raise NotFoundError("incident_spatial_marker", marker_id)
     if marker.version != payload.expected_version:
@@ -455,6 +564,7 @@ def _latest_revision(session: Session, incident: IncidentSeries, episode: Episod
 def _validate_supporting_markers(
     session: Session,
     incident: IncidentSeries,
+    episode: Episode,
     marker_ids: Iterable[str],
     *,
     require_validated: bool,
@@ -467,8 +577,14 @@ def _validate_supporting_markers(
         for observation_id, state in session.execute(
             select(Observation.observation_id, Observation.verification_state).where(
                 or_(
-                    Observation.attached_incident_id == incident.id,
-                    Observation.proposed_incident_id == incident.id,
+                    and_(
+                        Observation.attached_incident_id == incident.id,
+                        Observation.attached_episode_id == episode.id,
+                    ),
+                    and_(
+                        Observation.proposed_incident_id == incident.id,
+                        Observation.proposed_episode_id == episode.id,
+                    ),
                 )
             )
         )
@@ -477,11 +593,27 @@ def _validate_supporting_markers(
         marker_id: state
         for marker_id, state in session.execute(
             select(IncidentSpatialMarker.marker_id, IncidentSpatialMarker.review_state).where(
-                IncidentSpatialMarker.incident_id == incident.id
+                IncidentSpatialMarker.incident_id == incident.id,
+                IncidentSpatialMarker.episode_id == episode.id,
             )
         )
     }
-    known = set(observations) | set(persisted)
+    proposals = {
+        f"proposal:{proposal_id}": state
+        for proposal_id, state in session.execute(
+            select(AgentSpatialProposal.proposal_id, AgentSpatialProposal.review_state)
+            .join(
+                AgentAnalysisWindow,
+                AgentAnalysisWindow.id == AgentSpatialProposal.analysis_window_id,
+            )
+            .where(
+                AgentAnalysisWindow.incident_id == incident.id,
+                AgentAnalysisWindow.episode_id == episode.id,
+                AgentSpatialProposal.status == "ground_point",
+            )
+        )
+    }
+    known = set(observations) | set(persisted) | set(proposals)
     if unknown := requested - known:
         raise BadRequestError(
             "active_zone_unknown_marker", f"Unknown supporting marker: {sorted(unknown)[0]}"
@@ -499,6 +631,10 @@ def _validate_supporting_markers(
                 marker_id in persisted
                 and persisted[marker_id] != IncidentMarkerReviewState.VALIDATED
             )
+            or (
+                marker_id in proposals
+                and proposals[marker_id] != AgentProposalReviewState.VALIDATED
+            )
         }
         if invalid:
             raise ConflictError(
@@ -514,6 +650,7 @@ def _create_revision(
     episode: Episode,
     expected_latest_revision: int,
     valid_at: datetime,
+    analysis_window: AgentAnalysisWindow | None,
     geometry_geojson: dict[str, Any],
     geometry_origin: str,
     supporting_marker_ids: list[str],
@@ -528,9 +665,15 @@ def _create_revision(
             "active_zone_revision_conflict", "Active zone changed since the editor was loaded."
         )
     normalized, _ = _normalize_geometry(geometry_geojson)
-    _validate_supporting_markers(session, incident, supporting_marker_ids, require_validated=False)
+    _validate_supporting_markers(
+        session, incident, episode, supporting_marker_ids, require_validated=False
+    )
     try:
-        normalized_valid_at = ensure_utc(valid_at)
+        normalized_valid_at = (
+            as_utc(analysis_window.window_end_at)
+            if analysis_window is not None
+            else ensure_utc(valid_at)
+        )
     except ValueError as exc:
         raise BadRequestError("active_zone_datetime_timezone_required", str(exc)) from exc
     supersedes = session.execute(
@@ -544,6 +687,7 @@ def _create_revision(
         zone_revision_id=new_prefixed_id("azr"),
         incident_id=incident.id,
         episode_id=episode.id,
+        analysis_window_id=analysis_window.id if analysis_window is not None else None,
         revision=latest + 1,
         valid_at=normalized_valid_at,
         geometry_geojson=normalized,
@@ -565,7 +709,11 @@ def _create_revision(
         target_id=revision.zone_revision_id,
         reason=reason,
         trace_id=trace_id,
-        after={"revision": revision.revision, "review_state": revision.review_state.value},
+        after={
+            "revision": revision.revision,
+            "review_state": revision.review_state.value,
+            "analysis_id": analysis_window.analysis_id if analysis_window is not None else None,
+        },
     )
     session.commit()
     return revision
@@ -580,12 +728,27 @@ def create_zone_revision(
     trace_id: str,
 ) -> AdminActiveFireZoneRevision:
     incident, episode = _incident_and_episode(session, fire_id)
+    analysis_window = None
+    if payload.analysis_id is not None:
+        analysis_window = session.execute(
+            select(AgentAnalysisWindow).where(
+                AgentAnalysisWindow.analysis_id == payload.analysis_id,
+                AgentAnalysisWindow.incident_id == incident.id,
+                AgentAnalysisWindow.episode_id == episode.id,
+            )
+        ).scalar_one_or_none()
+        if analysis_window is None:
+            raise BadRequestError(
+                "active_zone_analysis_window_unknown",
+                "The selected analysis day does not belong to this incident episode.",
+            )
     revision = _create_revision(
         session,
         incident=incident,
         episode=episode,
         expected_latest_revision=payload.expected_latest_revision,
         valid_at=payload.valid_at,
+        analysis_window=analysis_window,
         geometry_geojson=payload.geometry_geojson,
         geometry_origin=payload.geometry_origin,
         supporting_marker_ids=payload.supporting_marker_ids,
@@ -630,12 +793,19 @@ def merge_zone_revisions(
         merged = MultiPolygon([merged])
     normalized = json_safe(mapping(merged))
     assert isinstance(normalized, dict)
+    analysis_window_ids = {item.analysis_window_id for item in sources}
+    analysis_window = None
+    if len(analysis_window_ids) == 1:
+        analysis_window_id = next(iter(analysis_window_ids))
+        if analysis_window_id is not None:
+            analysis_window = session.get(AgentAnalysisWindow, analysis_window_id)
     revision = _create_revision(
         session,
         incident=incident,
         episode=episode,
         expected_latest_revision=payload.expected_latest_revision,
         valid_at=payload.valid_at,
+        analysis_window=analysis_window,
         geometry_geojson=normalized,
         geometry_origin="DETERMINISTIC_UNION",
         supporting_marker_ids=payload.supporting_marker_ids,
@@ -677,7 +847,7 @@ def review_zone_revision(
         )
     if payload.action == "approve":
         _validate_supporting_markers(
-            session, incident, revision.supporting_marker_ids, require_validated=True
+            session, incident, episode, revision.supporting_marker_ids, require_validated=True
         )
         revision.review_state = ActiveFireZoneReviewState.READY_FOR_PUBLICATION
     else:

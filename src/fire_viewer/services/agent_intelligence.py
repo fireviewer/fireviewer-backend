@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from pyproj import Transformer
+from shapely.geometry import MultiPolygon, Point, Polygon, mapping
+from shapely.ops import transform, unary_union
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from fire_viewer.core.ids import new_prefixed_id
+from fire_viewer.core.security import Actor
 from fire_viewer.db.models import (
+    ActiveFireZoneRevision,
     AgentDispatch,
     AgentFactProposal,
     AgentMediaItem,
@@ -17,12 +22,131 @@ from fire_viewer.db.models import (
 )
 from fire_viewer.domain.agent_schemas import WorkerItemResultV2, WorkerOutputV2
 from fire_viewer.domain.enums import (
+    ActiveFireZoneReviewState,
+    ActorType,
     AgentAnalysisState,
     AgentMediaType,
     AgentProposalReviewState,
     AgentReportReviewState,
 )
 from fire_viewer.domain.hashing import json_safe
+from fire_viewer.services.common import record_operator_audit
+
+_WGS84_TO_L93 = Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=True)
+_L93_TO_WGS84 = Transformer.from_crs("EPSG:2154", "EPSG:4326", always_xy=True)
+
+
+def _refresh_daily_activity_zone(
+    session: Session,
+    dispatch: AgentDispatch,
+    *,
+    worker_id: str,
+) -> ActiveFireZoneRevision | None:
+    """Build one private, editable 2D activity-zone draft from all grounded daily points."""
+
+    batch = dispatch.batch
+    analysis_window = batch.analysis_window
+    if analysis_window is None or batch.incident_id is None or batch.episode_id is None:
+        return None
+    points = list(
+        session.scalars(
+            select(AgentSpatialProposal)
+            .where(
+                AgentSpatialProposal.analysis_window_id == analysis_window.id,
+                AgentSpatialProposal.status == "ground_point",
+                AgentSpatialProposal.review_state.notin_(
+                    [AgentProposalReviewState.REJECTED, AgentProposalReviewState.INVALIDATED]
+                ),
+            )
+            .order_by(AgentSpatialProposal.proposal_id.asc())
+        )
+    )
+    grounded = [
+        item
+        for item in points
+        if item.longitude is not None
+        and item.latitude is not None
+        and item.horizontal_accuracy_m is not None
+    ]
+    if not grounded:
+        return None
+
+    footprints = []
+    for item in grounded:
+        assert item.longitude is not None
+        assert item.latitude is not None
+        assert item.horizontal_accuracy_m is not None
+        east, north = _WGS84_TO_L93.transform(float(item.longitude), float(item.latitude))
+        radius_m = min(max(float(item.horizontal_accuracy_m), 25.0), 5_000.0)
+        footprints.append(Point(east, north).buffer(radius_m, quad_segs=4))
+    activity_l93 = unary_union(footprints).simplify(5.0, preserve_topology=True)
+    activity_wgs84 = transform(_L93_TO_WGS84.transform, activity_l93)
+    if isinstance(activity_wgs84, Polygon):
+        activity_wgs84 = MultiPolygon([activity_wgs84])
+    if not isinstance(activity_wgs84, MultiPolygon) or activity_wgs84.is_empty:
+        raise ValueError("grounded activity points did not produce a valid daily zone")
+    geometry = json_safe(mapping(activity_wgs84))
+    assert isinstance(geometry, dict)
+    support_ids = [f"proposal:{item.proposal_id}" for item in grounded]
+
+    latest = session.execute(
+        select(ActiveFireZoneRevision)
+        .where(
+            ActiveFireZoneRevision.incident_id == batch.incident_id,
+            ActiveFireZoneRevision.episode_id == batch.episode_id,
+        )
+        .order_by(ActiveFireZoneRevision.revision.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if latest is not None and latest.analysis_window_id == analysis_window.id:
+        if latest.geometry_origin != "AGENT_DERIVED" or (
+            latest.review_state == ActiveFireZoneReviewState.READY_FOR_PUBLICATION
+        ):
+            return latest
+        if latest.geometry_geojson == geometry and latest.supporting_marker_ids == support_ids:
+            return latest
+        if latest.review_state == ActiveFireZoneReviewState.DRAFT:
+            latest.review_state = ActiveFireZoneReviewState.REJECTED
+            latest.reviewed_by = worker_id
+            latest.reviewed_at = analysis_window.window_end_at
+            latest.review_reason = "Superseded by a later source batch for the same daily window."
+
+    revision = ActiveFireZoneRevision(
+        zone_revision_id=new_prefixed_id("azr"),
+        incident_id=batch.incident_id,
+        episode_id=batch.episode_id,
+        analysis_window_id=analysis_window.id,
+        revision=(latest.revision if latest is not None else 0) + 1,
+        valid_at=analysis_window.window_end_at,
+        geometry_geojson=geometry,
+        geometry_origin="AGENT_DERIVED",
+        supporting_marker_ids=support_ids,
+        source_revision_ids=[],
+        review_state=ActiveFireZoneReviewState.DRAFT,
+        supersedes_revision_id=latest.id if latest is not None else None,
+        created_by=worker_id,
+        reason=(
+            f"Zone d'activité 2D dérivée de {len(grounded)} point(s) géolocalisé(s) "
+            f"pour le {analysis_window.local_date.isoformat()}; validation humaine obligatoire."
+        ),
+    )
+    session.add(revision)
+    record_operator_audit(
+        session,
+        actor=Actor(actor_id=worker_id, roles=frozenset(), actor_type=ActorType.SYSTEM),
+        action="agent.daily_activity_zone_drafted",
+        target_type="active_fire_zone_revision",
+        target_id=revision.zone_revision_id,
+        reason=revision.reason,
+        trace_id=batch.trace_id,
+        after={
+            "analysis_id": analysis_window.analysis_id,
+            "revision": revision.revision,
+            "review_state": revision.review_state.value,
+            "supporting_marker_ids": support_ids,
+        },
+    )
+    return revision
 
 
 def _expected_evidence_ids(
@@ -204,6 +328,8 @@ def persist_worker_output_v2(
             session.add(stored_fact)
             facts_by_public_id[fact.fact_id] = stored_fact
     session.flush()
+
+    _refresh_daily_activity_zone(session, dispatch, worker_id=worker_id)
 
     if output.report_draft is not None:
         latest_revision = session.scalar(

@@ -47,11 +47,11 @@ def test_admin_spatial_package_registry_tracks_manifest_files_report_and_revisio
 ) -> None:
     revision = seed_revision(session)
     package = SpatialPackage(
-        package_id="pkg-synthetic-zone-r1-0001",
-        manifest_uri="s3://fire-viewer-admin/packages/pkg-synthetic-zone-r1-0001/manifest.json",
+        package_id="pkg-die-pontaix-r1-0001",
+        manifest_uri="s3://fire-viewer-admin/packages/pkg-die-pontaix-r1-0001/manifest.json",
         manifest_sha256="a" * 64,
         manifest_size_bytes=2_048,
-        storage_uri="s3://fire-viewer-admin/packages/pkg-synthetic-zone-r1-0001/",
+        storage_uri="s3://fire-viewer-admin/packages/pkg-die-pontaix-r1-0001/",
         state=SpatialPackageState.DRAFT,
         provenance={"pipeline": "unity-export", "operator": "admin-ui-test"},
         verification_report={},
@@ -59,7 +59,7 @@ def test_admin_spatial_package_registry_tracks_manifest_files_report_and_revisio
         files=[
             SpatialPackageFile(
                 kind=SpatialPackageFileKind.COG,
-                uri="s3://fire-viewer-admin/packages/pkg-synthetic-zone-r1-0001/terrain.cog.tif",
+                uri="s3://fire-viewer-admin/packages/pkg-die-pontaix-r1-0001/terrain.cog.tif",
                 sha256="b" * 64,
                 size_bytes=4_096,
                 media_type="image/geotiff",
@@ -67,7 +67,7 @@ def test_admin_spatial_package_registry_tracks_manifest_files_report_and_revisio
             ),
             SpatialPackageFile(
                 kind=SpatialPackageFileKind.PNG,
-                uri="s3://fire-viewer-admin/packages/pkg-synthetic-zone-r1-0001/archive.png",
+                uri="s3://fire-viewer-admin/packages/pkg-die-pontaix-r1-0001/archive.png",
                 sha256="c" * 64,
                 size_bytes=1_024,
                 media_type="image/png",
@@ -75,7 +75,7 @@ def test_admin_spatial_package_registry_tracks_manifest_files_report_and_revisio
             ),
             SpatialPackageFile(
                 kind=SpatialPackageFileKind.GLB,
-                uri="s3://fire-viewer-admin/packages/pkg-synthetic-zone-r1-0001/model.glb",
+                uri="s3://fire-viewer-admin/packages/pkg-die-pontaix-r1-0001/model.glb",
                 sha256="d" * 64,
                 size_bytes=8_192,
                 media_type="model/gltf-binary",
@@ -94,7 +94,7 @@ def test_admin_spatial_package_registry_tracks_manifest_files_report_and_revisio
     session.commit()
     session.refresh(revision)
 
-    assert revision.spatial_packages[0].package_id == "pkg-synthetic-zone-r1-0001"
+    assert revision.spatial_packages[0].package_id == "pkg-die-pontaix-r1-0001"
     assert {file.kind for file in revision.spatial_packages[0].files} == {
         SpatialPackageFileKind.COG,
         SpatialPackageFileKind.PNG,

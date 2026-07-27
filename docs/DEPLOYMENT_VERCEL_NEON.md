@@ -27,7 +27,7 @@ Le JSON attendu contient :
 {
   "status": "ready",
   "database": "ok",
-  "schema_revision": "d7c5e3a1b920",
+  "schema_revision": "ca3d7e9f2b61",
   "spatial_index": "ok"
 }
 ```
@@ -97,7 +97,7 @@ Définir séparément les valeurs **Preview** et **Production** :
 ```text
 FV_ENVIRONMENT=production
 FV_DATABASE_URL=<connexion Neon poolée>
-FV_DATABASE_SCHEMA_REVISION=e1c7a9b4d620
+FV_DATABASE_SCHEMA_REVISION=ca3d7e9f2b61
 FV_DATABASE_POOL_SIZE=2
 FV_DATABASE_MAX_OVERFLOW=3
 FV_OBJECT_STORAGE_BACKEND=vercel_blob
@@ -134,24 +134,44 @@ curl.exe -i https://api.exemple.fr/readyz
 
 Ne connecter le frontend qu'après un `200` de `/readyz`.
 
-### Dispatcher agentique hors Function
+### Dispatcher agentique dans le projet Vercel API
 
-Le polling RunPod ne tourne pas dans une Function Vercel. Déployer une instance CPU dédiée avec la
-même base Neon et les variables supplémentaires suivantes :
+Le projet API utilise trois déclencheurs Vercel :
+
+- suivi du seul job RunPod actif toutes les cinq minutes ;
+- preuves utilisateur toutes les trois heures ;
+- recherches médiatiques à 11 h et 23 h en heure de Paris. Le run de 11 h inclut la collecte
+  satellite, points chauds et thermique.
+
+Les quatre heures UTC du Cron média couvrent le changement heure d'été/heure d'hiver ; la route
+refuse silencieusement toute heure locale différente de 11 h ou 23 h. Les incendies actifs sont
+mis en file dans un ordre déterministe puis traités un par un. Tant qu'un job RunPod est actif,
+aucun second incendie ni aucune autre preuve n'est soumis. Une action humaine peut déclencher
+immédiatement le prochain pas autorisé, sans contourner cette exclusion.
+
+Chaque invocation revendique au plus une décision persistée, soumet ou interroge le job RunPod,
+enregistre le résultat puis se termine. Il n'existe donc ni boucle résidente ni service CPU
+supplémentaire. Le verrou consultatif PostgreSQL, le lease SQL et la barrière `SUBMITTING`
+conservent l'exclusion globale et la soumission au plus une fois.
+
+Définir les variables serveur suivantes :
 
 ```text
 FV_AGENT_DISPATCH_ENABLED=true
-FV_AGENT_RUNPOD_ENDPOINT_ID=<endpoint>
-FV_AGENT_RUNPOD_API_KEY=<secret serveur>
+CRON_SECRET=<secret aléatoire d'au moins 32 caractères>
+FV_AGENT_RUNPOD_TRANSPORT=pod
+FV_AGENT_RUNPOD_POD_BASE_URL=<URL HTTPS du pod>
+FV_AGENT_RUNPOD_POD_AUTH_TOKEN=<secret serveur>
 FV_AGENT_EXECUTION_TIMEOUT_MS=900000
 FV_AGENT_JOB_TTL_MS=3600000
 FV_AGENT_POLL_INTERVAL_SECONDS=5
 FV_AGENT_DISPATCH_LEASE_SECONDS=90
 ```
 
-Lancer `fire-viewer-agent-dispatcher`. Le secret RunPod ne doit être présent ni dans le frontend, ni
-dans l'image Docker publique du worker. Une seule instance est recommandée au MVP ; le lease atomique
-protège néanmoins la prise de travail concurrente.
+Vercel appelle automatiquement les routes sous
+`GET /api/v1/internal/agent-orchestrator/*` avec
+`Authorization: Bearer $CRON_SECRET`. Le secret RunPod reste uniquement dans les variables du projet
+API ; il ne doit être présent ni dans le frontend, ni dans l'image Docker publique du worker.
 
 ## 7. Connecter le frontend
 

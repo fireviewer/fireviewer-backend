@@ -60,16 +60,12 @@ def _sqlite_manifest_revision_v1() -> sa.Table:
         sa.ForeignKeyConstraint(["episode_id"], ["episode.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["asset_id"], ["model_asset.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(
-            ["spatial_zone_revision_id"],
-            ["spatial_zone_revision.id"],
-            name="fk_manifest_revision_spatial_zone_revision",
-            ondelete="RESTRICT",
+            ["spatial_zone_revision_id"], ["spatial_zone_revision.id"],
+            name="fk_manifest_revision_spatial_zone_revision", ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["spatial_package_id"],
-            ["spatial_package.id"],
-            name="fk_manifest_revision_spatial_package_id_spatial_package",
-            ondelete="RESTRICT",
+            ["spatial_package_id"], ["spatial_package.id"],
+            name="fk_manifest_revision_spatial_package_id_spatial_package", ondelete="RESTRICT",
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("incident_id", "revision", name="uq_manifest_revision"),
@@ -77,12 +73,7 @@ def _sqlite_manifest_revision_v1() -> sa.Table:
     sa.Index("ix_manifest_revision_incident_id", table.c.incident_id)
     sa.Index("ix_manifest_revision_spatial_package_id", table.c.spatial_package_id)
     sa.Index("ix_manifest_revision_spatial_zone_revision_id", table.c.spatial_zone_revision_id)
-    sa.Index(
-        "uq_manifest_one_current",
-        table.c.incident_id,
-        unique=True,
-        sqlite_where=sa.text("is_current = 1"),
-    )
+    sa.Index("uq_manifest_one_current", table.c.incident_id, unique=True, sqlite_where=sa.text("is_current = 1"))
     return table
 
 
@@ -100,7 +91,6 @@ def _replace_constraint(expression: str) -> None:
             expression,
         )
         return
-
     triggers = _sqlite_triggers()
     for name, _statement in triggers:
         op.execute(f'DROP TRIGGER IF EXISTS "{name.replace(chr(34), chr(34) * 2)}"')

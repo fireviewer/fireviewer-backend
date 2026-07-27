@@ -14,7 +14,7 @@ from typing import Any, Protocol
 
 import httpx
 from pydantic import ValidationError
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
@@ -29,6 +29,7 @@ from fire_viewer.db.models import (
     AgentMediaItem,
     AgentModelRun,
     AgentReviewTask,
+    AgentSourceResearchRun,
     IncidentSpatialMarker,
 )
 from fire_viewer.domain.agent_schemas import (
@@ -44,11 +45,16 @@ from fire_viewer.domain.enums import (
     AgentDispatchState,
     AgentModelRunState,
     AgentReviewState,
+    AgentSourceResearchState,
     IncidentMarkerReviewState,
 )
 from fire_viewer.services.agent_intelligence import (
     persist_worker_output_v2,
     validate_worker_output_v2,
+)
+from fire_viewer.services.agent_source_research import (
+    claim_next_source_research,
+    process_claimed_source_research,
 )
 from fire_viewer.services.common import record_operator_audit
 
@@ -61,6 +67,18 @@ CLAIMABLE_STATES = (
     AgentDispatchState.POLL_WAIT,
     AgentDispatchState.CANCEL_REQUESTED,
 )
+ACTIVE_DISPATCH_STATES = (
+    AgentDispatchState.SUBMITTING,
+    AgentDispatchState.AWAITING_REMOTE,
+    AgentDispatchState.POLL_WAIT,
+    AgentDispatchState.CANCEL_REQUESTED,
+)
+ACTIVE_RESEARCH_STATES = (
+    AgentSourceResearchState.SUBMITTING,
+    AgentSourceResearchState.RUNNING,
+    AgentSourceResearchState.CANCEL_REQUESTED,
+)
+_GLOBAL_DISPATCH_LOCK = 7_304_723_019
 
 
 class RunPodTransport(Protocol):
@@ -222,6 +240,7 @@ def claim_next_dispatch(
     *,
     worker_id: str,
     settings: Settings,
+    states: tuple[AgentDispatchState, ...] = CLAIMABLE_STATES,
 ) -> int | None:
     """Atomically lease one due dispatch on both SQLite and PostgreSQL."""
 
@@ -229,7 +248,7 @@ def claim_next_dispatch(
     due_id = (
         select(AgentDispatch.id)
         .where(
-            AgentDispatch.state.in_(CLAIMABLE_STATES),
+            AgentDispatch.state.in_(states),
             or_(AgentDispatch.next_attempt_at.is_(None), AgentDispatch.next_attempt_at <= now),
             or_(AgentDispatch.lease_until.is_(None), AgentDispatch.lease_until <= now),
         )
@@ -248,6 +267,39 @@ def claim_next_dispatch(
     ).scalar_one_or_none()
     session.commit()
     return claimed
+
+
+def _has_active_agent_work(session: Session) -> bool:
+    research_count = session.scalar(
+        select(func.count())
+        .select_from(AgentSourceResearchRun)
+        .where(AgentSourceResearchRun.state.in_(ACTIVE_RESEARCH_STATES))
+    )
+    dispatch_count = session.scalar(
+        select(func.count())
+        .select_from(AgentDispatch)
+        .where(AgentDispatch.state.in_(ACTIVE_DISPATCH_STATES))
+    )
+    return bool(research_count or dispatch_count)
+
+
+def _try_global_dispatch_lock(session: Session) -> bool:
+    if session.get_bind().dialect.name != "postgresql":
+        return True
+    return bool(
+        session.execute(
+            text("SELECT pg_try_advisory_lock(:lock_id)"),
+            {"lock_id": _GLOBAL_DISPATCH_LOCK},
+        ).scalar_one()
+    )
+
+
+def _release_global_dispatch_lock(session: Session) -> None:
+    if session.get_bind().dialect.name == "postgresql":
+        session.execute(
+            text("SELECT pg_advisory_unlock(:lock_id)"),
+            {"lock_id": _GLOBAL_DISPATCH_LOCK},
+        )
 
 
 def _release_lease(dispatch: AgentDispatch) -> None:
@@ -930,19 +982,76 @@ def run_dispatcher_once(
     client: RunPodTransport,
 ) -> bool:
     with factory() as session:
-        purge_due_agent_media(session)
-        dispatch_id = claim_next_dispatch(
-            session,
-            worker_id=worker_id,
-            settings=settings,
-        )
-        if dispatch_id is None:
+        if not _try_global_dispatch_lock(session):
             return False
-        process_claimed_dispatch(
-            session,
-            dispatch_id=dispatch_id,
-            worker_id=worker_id,
-            settings=settings,
-            client=client,
-        )
-        return True
+        try:
+            purge_due_agent_media(session)
+
+            # Always finish or cancel the one remote operation already in
+            # flight before claiming any queued work for another fire.
+            research_row_id = claim_next_source_research(
+                session,
+                worker_id=worker_id,
+                settings=settings,
+                states=ACTIVE_RESEARCH_STATES,
+            )
+            if research_row_id is not None:
+                process_claimed_source_research(
+                    session,
+                    research_row_id=research_row_id,
+                    worker_id=worker_id,
+                    settings=settings,
+                    client=client,
+                )
+                return True
+            dispatch_id = claim_next_dispatch(
+                session,
+                worker_id=worker_id,
+                settings=settings,
+                states=ACTIVE_DISPATCH_STATES,
+            )
+            if dispatch_id is not None:
+                process_claimed_dispatch(
+                    session,
+                    dispatch_id=dispatch_id,
+                    worker_id=worker_id,
+                    settings=settings,
+                    client=client,
+                )
+                return True
+            if _has_active_agent_work(session):
+                return False
+
+            research_row_id = claim_next_source_research(
+                session,
+                worker_id=worker_id,
+                settings=settings,
+                states=(AgentSourceResearchState.QUEUED,),
+            )
+            if research_row_id is not None:
+                process_claimed_source_research(
+                    session,
+                    research_row_id=research_row_id,
+                    worker_id=worker_id,
+                    settings=settings,
+                    client=client,
+                )
+                return True
+            dispatch_id = claim_next_dispatch(
+                session,
+                worker_id=worker_id,
+                settings=settings,
+                states=(AgentDispatchState.QUEUED,),
+            )
+            if dispatch_id is None:
+                return False
+            process_claimed_dispatch(
+                session,
+                dispatch_id=dispatch_id,
+                worker_id=worker_id,
+                settings=settings,
+                client=client,
+            )
+            return True
+        finally:
+            _release_global_dispatch_lock(session)

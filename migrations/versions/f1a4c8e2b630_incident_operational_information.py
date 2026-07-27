@@ -21,12 +21,7 @@ def upgrade() -> None:
         "incident_operational_information",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("information_id", sa.String(length=96), nullable=False, unique=True),
-        sa.Column(
-            "incident_id",
-            sa.Integer(),
-            sa.ForeignKey("incident_series.id", ondelete="RESTRICT"),
-            nullable=False,
-        ),
+        sa.Column("incident_id", sa.Integer(), sa.ForeignKey("incident_series.id", ondelete="RESTRICT"), nullable=False),
         sa.Column("episode_id", sa.Integer(), sa.ForeignKey("episode.id", ondelete="RESTRICT")),
         sa.Column("kind", sa.String(length=32), nullable=False),
         sa.Column("title", sa.String(length=120), nullable=False),
@@ -50,81 +45,28 @@ def upgrade() -> None:
         sa.Column("version", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint(
-            "kind IN ('affected_place', 'evacuated_people', 'mobilized_personnel', 'mobilized_vehicles', 'road_status', 'access_status', 'shelter', 'public_service', 'utility', 'other')",
-            name="ck_operational_information_kind",
-        ),
-        sa.CheckConstraint(
-            "(value_text IS NOT NULL) OR (value_number IS NOT NULL)",
-            name="ck_operational_information_value",
-        ),
-        sa.CheckConstraint(
-            "value_number IS NULL OR value_number >= 0",
-            name="ck_operational_information_value_number",
-        ),
-        sa.CheckConstraint(
-            "authority_kind IN ('mairie', 'prefecture', 'police')",
-            name="ck_operational_information_authority",
-        ),
-        sa.CheckConstraint(
-            "state IN ('PROPOSED', 'PUBLISHED', 'REJECTED', 'RETIRED')",
-            name="ck_operational_information_state",
-        ),
+        sa.CheckConstraint("kind IN ('affected_place', 'evacuated_people', 'mobilized_personnel', 'mobilized_vehicles', 'road_status', 'access_status', 'shelter', 'public_service', 'utility', 'other')", name="ck_operational_information_kind"),
+        sa.CheckConstraint("(value_text IS NOT NULL) OR (value_number IS NOT NULL)", name="ck_operational_information_value"),
+        sa.CheckConstraint("value_number IS NULL OR value_number >= 0", name="ck_operational_information_value_number"),
+        sa.CheckConstraint("authority_kind IN ('mairie', 'prefecture', 'police')", name="ck_operational_information_authority"),
+        sa.CheckConstraint("state IN ('PROPOSED', 'PUBLISHED', 'REJECTED', 'RETIRED')", name="ck_operational_information_state"),
         sa.CheckConstraint("source_url LIKE 'https://%'", name="ck_operational_information_https"),
-        sa.CheckConstraint(
-            "source_reference_url LIKE 'https://%'", name="ck_operational_information_source_https"
-        ),
+        sa.CheckConstraint("source_reference_url LIKE 'https://%'", name="ck_operational_information_source_https"),
         sa.CheckConstraint("version >= 1", name="ck_operational_information_version"),
     )
-    op.create_index(
-        "ix_incident_operational_information_information_id",
-        "incident_operational_information",
-        ["information_id"],
-        unique=True,
-    )
-    op.create_index(
-        "ix_incident_operational_information_incident_id",
-        "incident_operational_information",
-        ["incident_id"],
-    )
-    op.create_index(
-        "ix_incident_operational_information_episode_id",
-        "incident_operational_information",
-        ["episode_id"],
-    )
-    op.create_index(
-        "ix_incident_operational_information_kind", "incident_operational_information", ["kind"]
-    )
-    op.create_index(
-        "ix_incident_operational_information_state", "incident_operational_information", ["state"]
-    )
-    op.create_index(
-        "ix_operational_information_incident_state",
-        "incident_operational_information",
-        ["incident_id", "state"],
-    )
+    op.create_index("ix_incident_operational_information_information_id", "incident_operational_information", ["information_id"], unique=True)
+    op.create_index("ix_incident_operational_information_incident_id", "incident_operational_information", ["incident_id"])
+    op.create_index("ix_incident_operational_information_episode_id", "incident_operational_information", ["episode_id"])
+    op.create_index("ix_incident_operational_information_kind", "incident_operational_information", ["kind"])
+    op.create_index("ix_incident_operational_information_state", "incident_operational_information", ["state"])
+    op.create_index("ix_operational_information_incident_state", "incident_operational_information", ["incident_id", "state"])
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_operational_information_incident_state", table_name="incident_operational_information"
-    )
-    op.drop_index(
-        "ix_incident_operational_information_state", table_name="incident_operational_information"
-    )
-    op.drop_index(
-        "ix_incident_operational_information_kind", table_name="incident_operational_information"
-    )
-    op.drop_index(
-        "ix_incident_operational_information_episode_id",
-        table_name="incident_operational_information",
-    )
-    op.drop_index(
-        "ix_incident_operational_information_incident_id",
-        table_name="incident_operational_information",
-    )
-    op.drop_index(
-        "ix_incident_operational_information_information_id",
-        table_name="incident_operational_information",
-    )
+    op.drop_index("ix_operational_information_incident_state", table_name="incident_operational_information")
+    op.drop_index("ix_incident_operational_information_state", table_name="incident_operational_information")
+    op.drop_index("ix_incident_operational_information_kind", table_name="incident_operational_information")
+    op.drop_index("ix_incident_operational_information_episode_id", table_name="incident_operational_information")
+    op.drop_index("ix_incident_operational_information_incident_id", table_name="incident_operational_information")
+    op.drop_index("ix_incident_operational_information_information_id", table_name="incident_operational_information")
     op.drop_table("incident_operational_information")

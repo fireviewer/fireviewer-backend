@@ -7,28 +7,33 @@ from collections import defaultdict
 from datetime import UTC
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from fire_viewer.core.config import Settings
 from fire_viewer.core.ids import new_prefixed_id
 from fire_viewer.core.security import Actor
 from fire_viewer.core.time import as_utc, utcnow
 from fire_viewer.db.models import (
+    ActiveFireZoneRevision,
     AuditEvent,
     Episode,
     IncidentBulletinEntry,
     IncidentGalleryItem,
+    IncidentMapCapture,
     IncidentOfficialResource,
     IncidentOperationalInformation,
     IncidentPublicReport,
     IncidentSeries,
     Observation,
+    PublicContributionSubmission,
     Source,
 )
 from fire_viewer.db.transactions import begin_write_transaction
 from fire_viewer.domain.enums import (
+    ActiveFireZoneReviewState,
     ActorType,
     EvidenceSpatialMode,
+    PublicContributionState,
     PublicReportState,
     VerificationState,
 )
@@ -39,9 +44,11 @@ from fire_viewer.domain.schemas import (
     AdminPublicReportEnvelope,
     AdminPublicReportListResponse,
     AdminPublicReportReviewRequest,
+    PublicActiveFireZone,
     PublicDownload,
     PublicEvidenceProjection,
     PublicIncidentGalleryItem,
+    PublicIncidentMapCapture,
     PublicIncidentReport,
     PublicIncidentReportReceipt,
     PublicIncidentReportRequest,
@@ -197,6 +204,8 @@ def get_public_incident_view(
             episodes=[],
             observations=[],
             evidence_projections=[],
+            active_fire_zone=None,
+            map_gallery=[],
             gallery=[],
             official_resources=[],
             operational_information=[],
@@ -271,13 +280,14 @@ def get_public_incident_view(
                 IncidentBulletinEntry.state == "PUBLISHED",
             )
             .order_by(
-                IncidentBulletinEntry.effective_at.desc(), IncidentBulletinEntry.entry_id.asc()
+                IncidentBulletinEntry.effective_at.desc(),
+                IncidentBulletinEntry.entry_id.asc(),
             )
         )
         .scalars()
         .all()
     )
-    bulletin_source_rows = (
+    bulletin_sources = (
         session.execute(
             select(Source)
             .join(IncidentBulletinEntry, IncidentBulletinEntry.source_id == Source.id)
@@ -290,7 +300,7 @@ def get_public_incident_view(
         .scalars()
         .all()
     )
-    for source in bulletin_source_rows:
+    for source in bulletin_sources:
         source_rows.setdefault(source.id, source)
         source_counts.setdefault(source.id, 0)
     sources = [
@@ -306,10 +316,16 @@ def get_public_incident_view(
         )
         for source_id, source in sorted(source_rows.items(), key=lambda item: item[1].source_key)
     ]
-    # The current incident contract has no explicit link to the agentic contribution
-    # receipts.  Never infer public contribution counts from unverified observations:
-    # both counters stay absent until the dedicated, reviewed contribution feed is wired.
-    participatory_observation_count = None
+    # A contribution remains private unless an operator accepts it.  The public view
+    # intentionally exposes only this aggregate: no pending/rejected/withdrawn receipt,
+    # consent detail, media, description, or location is projected here.
+    reviewed_contribution_count = session.scalar(
+        select(func.count(PublicContributionSubmission.id)).where(
+            PublicContributionSubmission.incident_id == incident.id,
+            PublicContributionSubmission.state == PublicContributionState.ACCEPTED,
+        )
+    )
+    participatory_observation_count = reviewed_contribution_count or None
     participatory_received_count = None
 
     evidence_projections = _evidence_projections(
@@ -418,6 +434,36 @@ def get_public_incident_view(
     )
     timeline.sort(key=lambda item: item.occurred_at, reverse=True)
     model = _public_model(session, incident, settings)
+    active_zone = session.execute(
+        select(ActiveFireZoneRevision)
+        .where(
+            ActiveFireZoneRevision.incident_id == incident.id,
+            ActiveFireZoneRevision.episode_id == current.id,
+            ActiveFireZoneRevision.review_state == ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
+        )
+        .order_by(ActiveFireZoneRevision.revision.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    map_captures = list(
+        session.scalars(
+            select(IncidentMapCapture)
+            .join(
+                ActiveFireZoneRevision,
+                ActiveFireZoneRevision.id == IncidentMapCapture.active_zone_revision_id,
+            )
+            .where(
+                IncidentMapCapture.incident_id == incident.id,
+                IncidentMapCapture.episode_id == current.id,
+                ActiveFireZoneRevision.review_state
+                == ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
+            )
+            .options(selectinload(IncidentMapCapture.active_zone_revision))
+            .order_by(
+                IncidentMapCapture.local_date.asc(),
+                IncidentMapCapture.captured_at.asc(),
+            )
+        )
+    )
     if current.verification_state == VerificationState.VERIFIED:
         facts = ["Une validation humaine de cet épisode a été enregistrée."]
     else:
@@ -466,6 +512,28 @@ def get_public_incident_view(
         ],
         observations=observations,
         evidence_projections=evidence_projections,
+        active_fire_zone=(
+            PublicActiveFireZone(
+                zone_revision_id=active_zone.zone_revision_id,
+                revision=active_zone.revision,
+                valid_at=as_utc(active_zone.valid_at),
+                geometry_geojson=active_zone.geometry_geojson,
+            )
+            if active_zone is not None
+            else None
+        ),
+        map_gallery=[
+            PublicIncidentMapCapture(
+                capture_id=item.capture_id,
+                zone_revision_id=item.active_zone_revision.zone_revision_id,
+                local_date=item.local_date,
+                captured_at=as_utc(item.captured_at),
+                image_url=(f"/api/v1/incident/{incident.fire_id}/map-gallery/{item.capture_id}"),
+                width_px=item.width_px,
+                height_px=item.height_px,
+            )
+            for item in map_captures
+        ],
         gallery=[
             PublicIncidentGalleryItem(
                 gallery_item_id=item.gallery_item_id,
@@ -479,7 +547,9 @@ def get_public_incident_view(
                 captured_at=as_utc(item.captured_at) if item.captured_at else None,
                 published_at=as_utc(item.published_at) if item.published_at else None,
                 episode_id=(
-                    episode_public_ids.get(item.episode_id) if item.episode_id is not None else None
+                    episode_public_ids.get(item.episode_id)
+                    if item.episode_id is not None
+                    else None
                 ),
             )
             for item in gallery_items
@@ -493,7 +563,9 @@ def get_public_incident_view(
                 url=item.url,
                 published_at=as_utc(item.published_at) if item.published_at else None,
                 episode_id=(
-                    episode_public_ids.get(item.episode_id) if item.episode_id is not None else None
+                    episode_public_ids.get(item.episode_id)
+                    if item.episode_id is not None
+                    else None
                 ),
             )
             for item in official_resources
@@ -513,7 +585,9 @@ def get_public_incident_view(
                 effective_at=as_utc(item.effective_at) if item.effective_at else None,
                 published_at=as_utc(item.published_at) if item.published_at else None,
                 episode_id=(
-                    episode_public_ids.get(item.episode_id) if item.episode_id is not None else None
+                    episode_public_ids.get(item.episode_id)
+                    if item.episode_id is not None
+                    else None
                 ),
             )
             for item in operational_information

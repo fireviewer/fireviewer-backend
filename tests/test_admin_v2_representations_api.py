@@ -276,11 +276,16 @@ def test_attach_tiled_package_publishes_controlled_scene_without_fake_model_asse
     assert manifest.status_code == 200, manifest.text
     assert manifest.json()["model_state"] == "available"
     assert manifest.json()["asset"] is None
-    assert len(manifest.json()["scene"]["files"]) == 2
+    assert manifest.json()["scene"]["files"] == []
     catalog_response = client.get(manifest.json()["scene"]["catalog_url"])
     assert catalog_response.status_code == 200
     assert catalog_response.content == catalog
-    tile_file = next(item for item in manifest.json()["scene"]["files"] if item["kind"] == "FWTILE")
+    bootstrap_response = client.get(f"/api/v1/incident/{incident.fire_id}/spatial-scene/bootstrap")
+    assert bootstrap_response.status_code == 200, bootstrap_response.text
+    assert len(bootstrap_response.json()["files"]) == 2
+    tile_file = next(
+        item for item in bootstrap_response.json()["files"] if item["kind"] == "FWTILE"
+    )
     tile_response = client.get(tile_file["url"])
     assert tile_response.status_code == 200
     assert tile_response.content == b"fireviewer-detail-tile"

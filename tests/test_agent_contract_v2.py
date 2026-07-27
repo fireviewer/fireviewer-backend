@@ -60,7 +60,7 @@ def test_agent_batch_v2_preserves_consent_before_worker_dispatch() -> None:
                 ],
                 "terms_version": "press-license-v1",
                 "evidence_sha256": "e" * 64,
-                "source_reference_url": "https://press.example/incendie-synthetic-zone",
+                "source_reference_url": "https://press.example/incendie-die",
                 "license_identifier": "authorized-free-press-use",
                 "granted_at": "2026-07-09T18:00:00Z",
             },

@@ -613,11 +613,11 @@ def test_incident_project_map_import_creates_missing_zone_and_revision(
         sequence=914,
         lon=2.588886,
         lat=48.3894574,
-        canonical_name="Zone forestière synthétique",
+        canonical_name="Forêt de Fontainebleau",
         status=IncidentStatus.MONITORING,
     )
-    package_id = "pkg-synthetic-auto-r1"
-    zone_id = "SYNTHETIC-AUTO-01"
+    package_id = "pkg-fontainebleau-auto-r1"
+    zone_id = "FONTAINEBLEAU-AUTO-01"
     upload_id = "2" * 32
     documents = _remote_tile_package_documents(
         package_id=package_id,
@@ -636,7 +636,7 @@ def test_incident_project_map_import_creates_missing_zone_and_revision(
             "revision": 1,
             "expected_incident_version": incident.version,
             "primary_profile": "local",
-            "reason": "Import automatique du fond 3D depuis le projet synthétique.",
+            "reason": "Import automatique du fond 3D depuis le projet Fontainebleau.",
             "objects": objects,
         },
         headers=_headers("incident-project-map-auto-0001"),
@@ -646,7 +646,7 @@ def test_incident_project_map_import_creates_missing_zone_and_revision(
     session.expire_all()
     zone = session.scalar(select(SpatialZone).where(SpatialZone.zone_id == zone_id))
     assert zone is not None
-    assert zone.label == "Zone forestière synthétique"
+    assert zone.label == "Forêt de Fontainebleau"
     profile = session.scalar(select(ZoneProfile).where(ZoneProfile.spatial_zone_id == zone.id))
     assert profile is not None
     origin_easting, origin_northing = wgs84_to_lambert93(

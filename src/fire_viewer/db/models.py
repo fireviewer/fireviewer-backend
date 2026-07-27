@@ -40,6 +40,9 @@ from fire_viewer.domain.enums import (
     AgentProposalReviewState,
     AgentReportReviewState,
     AgentReviewState,
+    AgentSourceCandidateState,
+    AgentSourcePackageState,
+    AgentSourceResearchState,
     AssetLod,
     AssetState,
     EvidenceSpatialMode,
@@ -48,6 +51,8 @@ from fire_viewer.domain.enums import (
     JobKind,
     JobState,
     MatchDecision,
+    PublicContributionKind,
+    PublicContributionState,
     PublicReportCategory,
     PublicReportState,
     PublicVisibility,
@@ -157,6 +162,9 @@ class IncidentSeries(Base, TimestampMixin):
         back_populates="incident", uselist=False
     )
     public_reports: Mapped[list[IncidentPublicReport]] = relationship(back_populates="incident")
+    public_contributions: Mapped[list[PublicContributionSubmission]] = relationship(
+        back_populates="incident"
+    )
     official_resources: Mapped[list[IncidentOfficialResource]] = relationship(
         back_populates="incident", cascade="all, delete-orphan"
     )
@@ -395,6 +403,101 @@ class IncidentPublicReport(Base):
     )
 
 
+class PublicContributionSubmission(Base, TimestampMixin):
+    """Anonymous public evidence kept private until an operator reviews it."""
+
+    __tablename__ = "public_contribution_submission"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    contribution_id: Mapped[str] = mapped_column(
+        String(96), nullable=False, unique=True, index=True
+    )
+    kind: Mapped[PublicContributionKind] = mapped_column(
+        enum_column(PublicContributionKind, name="public_contribution_kind"), nullable=False
+    )
+    state: Mapped[PublicContributionState] = mapped_column(
+        enum_column(PublicContributionState, name="public_contribution_state"),
+        nullable=False,
+        default=PublicContributionState.OPEN,
+        index=True,
+    )
+    incident_id: Mapped[int | None] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), index=True
+    )
+    source_package_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_source_package.id", ondelete="RESTRICT"),
+        unique=True,
+        index=True,
+    )
+    submission_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    consent_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    contact_reference_hash: Mapped[str | None] = mapped_column(String(64))
+    origin_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    submitted_day: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    tracking_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    purge_after: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    review_reason: Mapped[str | None] = mapped_column(String(1_000))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    incident: Mapped[IncidentSeries | None] = relationship(back_populates="public_contributions")
+    source_package: Mapped[AgentSourcePackage | None] = relationship(
+        back_populates="public_contribution", foreign_keys=[source_package_id]
+    )
+    gallery_items: Mapped[list[IncidentGalleryItem]] = relationship(
+        back_populates="source_contribution",
+        foreign_keys="IncidentGalleryItem.source_contribution_id",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "origin_fingerprint",
+            "submitted_day",
+            "idempotency_key",
+            name="uq_public_contribution_origin_day_idempotency",
+        ),
+        CheckConstraint(
+            sha256_hex_check("origin_fingerprint"), name="ck_public_contribution_origin_hash"
+        ),
+        CheckConstraint(
+            sha256_hex_check("request_hash"), name="ck_public_contribution_request_hash"
+        ),
+        CheckConstraint(
+            sha256_hex_check("tracking_token_hash"),
+            name="ck_public_contribution_tracking_hash",
+        ),
+        CheckConstraint(
+            "contact_reference_hash IS NULL OR ("
+            + sha256_hex_check("contact_reference_hash")
+            + ")",
+            name="ck_public_contribution_contact_hash",
+        ),
+        CheckConstraint("version >= 1", name="ck_public_contribution_version"),
+    )
+
+
+class AgentScheduleRun(Base, TimestampMixin):
+    """Durable lease and watermark for low-frequency private agent intake jobs."""
+
+    __tablename__ = "agent_schedule_run"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    schedule_key: Mapped[str] = mapped_column(String(96), nullable=False, unique=True)
+    next_run_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(255))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class IncidentOfficialResource(Base, TimestampMixin):
     """A human-reviewed official link. Candidate provenance is never public."""
 
@@ -534,17 +637,23 @@ class IncidentGalleryItem(Base, TimestampMixin):
     episode_id: Mapped[int | None] = mapped_column(
         ForeignKey("episode.id", ondelete="RESTRICT"), index=True
     )
+    source_contribution_id: Mapped[int | None] = mapped_column(
+        ForeignKey("public_contribution_submission.id", ondelete="RESTRICT"), index=True
+    )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     caption: Mapped[str | None] = mapped_column(String(1_000))
     alt_text: Mapped[str] = mapped_column(String(500), nullable=False)
-    media_url: Mapped[str] = mapped_column(String(2_048), nullable=False)
+    media_url: Mapped[str | None] = mapped_column(String(2_048))
     media_kind: Mapped[str] = mapped_column(String(16), nullable=False, default="image")
     credit: Mapped[str | None] = mapped_column(String(255))
     license_label: Mapped[str | None] = mapped_column(String(255))
     captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="PROPOSED", index=True)
-    source_reference_url: Mapped[str] = mapped_column(String(2_048), nullable=False)
+    # A contribution-backed proposal has no public provenance URL until an
+    # editor materialises a safe editorial copy. Publication remains blocked
+    # until both the media and source reference are present.
+    source_reference_url: Mapped[str | None] = mapped_column(String(2_048))
     proposal_reason: Mapped[str] = mapped_column(String(1_000), nullable=False)
     proposed_by: Mapped[str] = mapped_column(String(255), nullable=False)
     proposed_at: Mapped[datetime] = mapped_column(
@@ -557,6 +666,9 @@ class IncidentGalleryItem(Base, TimestampMixin):
 
     incident: Mapped[IncidentSeries] = relationship(back_populates="gallery_items")
     episode: Mapped[Episode | None] = relationship(back_populates="gallery_items")
+    source_contribution: Mapped[PublicContributionSubmission | None] = relationship(
+        back_populates="gallery_items", foreign_keys=[source_contribution_id]
+    )
 
     __table_args__ = (
         CheckConstraint("media_kind IN ('image', 'video')", name="ck_gallery_item_media_kind"),
@@ -564,12 +676,63 @@ class IncidentGalleryItem(Base, TimestampMixin):
             "state IN ('PROPOSED', 'PUBLISHED', 'REJECTED', 'RETIRED')",
             name="ck_gallery_item_state",
         ),
-        CheckConstraint("media_url LIKE 'https://%'", name="ck_gallery_item_media_https"),
         CheckConstraint(
-            "source_reference_url LIKE 'https://%'", name="ck_gallery_item_source_https"
+            "media_url IS NULL OR media_url LIKE 'https://%'", name="ck_gallery_item_media_https"
+        ),
+        CheckConstraint(
+            "state != 'PUBLISHED' OR media_url IS NOT NULL",
+            name="ck_gallery_item_published_media",
+        ),
+        CheckConstraint(
+            "source_reference_url IS NULL OR source_reference_url LIKE 'https://%'",
+            name="ck_gallery_item_source_https",
+        ),
+        CheckConstraint(
+            "state != 'PUBLISHED' OR source_reference_url IS NOT NULL",
+            name="ck_gallery_item_published_source",
         ),
         CheckConstraint("version >= 1", name="ck_gallery_item_version"),
         Index("ix_gallery_item_incident_state", "incident_id", "state"),
+    )
+
+
+class IncidentBulletinEntry(Base, TimestampMixin):
+    """Administrator-verified public fact or timeline entry."""
+
+    __tablename__ = "incident_bulletin_entry"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entry_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    incident_id: Mapped[int] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    episode_id: Mapped[int | None] = mapped_column(
+        ForeignKey("episode.id", ondelete="RESTRICT"), index=True
+    )
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    body: Mapped[str] = mapped_column(String(1_000), nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="PUBLISHED", index=True)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    retired_by: Mapped[str | None] = mapped_column(String(255))
+    retirement_reason: Mapped[str | None] = mapped_column(String(500))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    incident: Mapped[IncidentSeries] = relationship(back_populates="bulletin_entries")
+    episode: Mapped[Episode | None] = relationship(back_populates="bulletin_entries")
+    source: Mapped[Source] = relationship()
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('fact', 'timeline')", name="ck_bulletin_entry_kind"),
+        CheckConstraint("state IN ('PUBLISHED', 'RETIRED')", name="ck_bulletin_entry_state"),
+        CheckConstraint("version >= 1", name="ck_bulletin_entry_version"),
+        Index("ix_bulletin_entry_incident_state", "incident_id", "state"),
     )
 
 
@@ -623,51 +786,6 @@ class ZoneProfile(Base, TimestampMixin):
             "min_easting_l93 < max_easting_l93 AND min_northing_l93 < max_northing_l93",
             name="ck_zone_profile_l93_bounds",
         ),
-    )
-
-
-class IncidentBulletinEntry(Base, TimestampMixin):
-    """An administrator-verified public fact or timeline entry.
-
-    These records deliberately belong to the public bulletin only. They are
-    neither gallery media nor spatial evidence and cannot affect either
-    publication lifecycle.
-    """
-
-    __tablename__ = "incident_bulletin_entry"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    entry_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
-    incident_id: Mapped[int] = mapped_column(
-        ForeignKey("incident_series.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    episode_id: Mapped[int | None] = mapped_column(
-        ForeignKey("episode.id", ondelete="RESTRICT"), index=True
-    )
-    source_id: Mapped[int] = mapped_column(
-        ForeignKey("source.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    kind: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
-    body: Mapped[str] = mapped_column(String(1_000), nullable=False)
-    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    state: Mapped[str] = mapped_column(String(16), nullable=False, default="PUBLISHED", index=True)
-    reason: Mapped[str] = mapped_column(String(500), nullable=False)
-    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
-    retired_by: Mapped[str | None] = mapped_column(String(255))
-    retirement_reason: Mapped[str | None] = mapped_column(String(500))
-    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-
-    incident: Mapped[IncidentSeries] = relationship(back_populates="bulletin_entries")
-    episode: Mapped[Episode | None] = relationship(back_populates="bulletin_entries")
-    source: Mapped[Source] = relationship()
-
-    __table_args__ = (
-        CheckConstraint("kind IN ('fact', 'timeline')", name="ck_bulletin_entry_kind"),
-        CheckConstraint("state IN ('PUBLISHED', 'RETIRED')", name="ck_bulletin_entry_state"),
-        CheckConstraint("version >= 1", name="ck_bulletin_entry_version"),
-        Index("ix_bulletin_entry_incident_state", "incident_id", "state"),
     )
 
 
@@ -1375,6 +1493,12 @@ class AgentAnalysisWindow(Base, TimestampMixin):
         order_by="AgentSituationReportRevision.revision",
         overlaps="incident,episode",
     )
+    source_packages: Mapped[list[AgentSourcePackage]] = relationship(
+        back_populates="analysis_window"
+    )
+    source_research_runs: Mapped[list[AgentSourceResearchRun]] = relationship(
+        back_populates="analysis_window"
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -1386,6 +1510,276 @@ class AgentAnalysisWindow(Base, TimestampMixin):
         CheckConstraint("window_end_at > window_start_at", name="ck_agent_analysis_window_order"),
         CheckConstraint("length(timezone) >= 3", name="ck_agent_analysis_timezone"),
         CheckConstraint("version >= 1", name="ck_agent_analysis_version"),
+    )
+
+
+class AgentSourcePackage(Base, TimestampMixin):
+    """Private user-provided sources before they become normal media batches."""
+
+    __tablename__ = "agent_source_package"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    package_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    incident_id: Mapped[int | None] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    episode_id: Mapped[int | None] = mapped_column(
+        ForeignKey("episode.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    analysis_window_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_analysis_window.id", ondelete="RESTRICT"), index=True
+    )
+    state: Mapped[AgentSourcePackageState] = mapped_column(
+        enum_column(AgentSourcePackageState, name="agent_source_package_state"),
+        nullable=False,
+        default=AgentSourcePackageState.OPEN,
+        index=True,
+    )
+    upload_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    pathname_prefix: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    declared_file_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    declared_total_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    known_start_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    known_end_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    location_hint: Mapped[str | None] = mapped_column(String(500))
+    analysis_authorized: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    publication_authorized: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    terms_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    consent_evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    consent_scopes: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=lambda: ["temporary_storage", "agent_analysis", "human_review"],
+    )
+    subject_reference_hash: Mapped[str | None] = mapped_column(String(64))
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    purge_after: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_code: Mapped[str | None] = mapped_column(String(128))
+    failure_detail: Mapped[str | None] = mapped_column(String(1_000))
+
+    incident: Mapped[IncidentSeries | None] = relationship(foreign_keys=[incident_id])
+    episode: Mapped[Episode | None] = relationship(foreign_keys=[episode_id])
+    analysis_window: Mapped[AgentAnalysisWindow | None] = relationship(
+        back_populates="source_packages"
+    )
+    items: Mapped[list[AgentSourcePackageItem]] = relationship(
+        back_populates="package", cascade="all, delete-orphan", order_by="AgentSourcePackageItem.id"
+    )
+    public_contribution: Mapped[PublicContributionSubmission | None] = relationship(
+        back_populates="source_package",
+        uselist=False,
+        foreign_keys="PublicContributionSubmission.source_package_id",
+    )
+
+    __table_args__ = (
+        CheckConstraint("declared_file_count > 0", name="ck_agent_source_package_file_count"),
+        CheckConstraint("declared_total_size_bytes > 0", name="ck_agent_source_package_total_size"),
+        CheckConstraint(
+            "known_end_date >= known_start_date", name="ck_agent_source_package_date_order"
+        ),
+        CheckConstraint("analysis_authorized", name="ck_agent_source_package_analysis_authorized"),
+        CheckConstraint("NOT publication_authorized", name="ck_agent_source_package_not_public"),
+        CheckConstraint(
+            "(incident_id IS NULL AND episode_id IS NULL) OR "
+            "(incident_id IS NOT NULL AND episode_id IS NOT NULL)",
+            name="ck_agent_source_package_incident_episode_pair",
+        ),
+        CheckConstraint(
+            sha256_hex_check("consent_evidence_sha256"),
+            name="ck_agent_source_package_consent_hash",
+        ),
+        CheckConstraint(
+            sha256_hex_check("request_hash"), name="ck_agent_source_package_request_hash"
+        ),
+        CheckConstraint(
+            "subject_reference_hash IS NULL OR ("
+            + sha256_hex_check("subject_reference_hash")
+            + ")",
+            name="ck_agent_source_package_subject_hash",
+        ),
+    )
+
+
+class AgentSourcePackageItem(Base, TimestampMixin):
+    __tablename__ = "agent_source_package_item"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    item_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    package_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_source_package.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    agent_media_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_media_item.id", ondelete="RESTRICT"), unique=True, index=True
+    )
+    pathname: Mapped[str] = mapped_column(String(1_024), nullable=False, unique=True)
+    object_uri: Mapped[str] = mapped_column(String(1_024), nullable=False, unique=True)
+    original_filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    media_type: Mapped[AgentMediaType] = mapped_column(
+        enum_column(AgentMediaType, name="agent_source_package_media_type"), nullable=False
+    )
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    metadata_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+    package: Mapped[AgentSourcePackage] = relationship(back_populates="items")
+    agent_media_item: Mapped[AgentMediaItem | None] = relationship(
+        foreign_keys=[agent_media_item_id]
+    )
+
+    __table_args__ = (
+        UniqueConstraint("package_id", "pathname", name="uq_agent_source_package_item_path"),
+        CheckConstraint(sha256_hex_check("sha256"), name="ck_agent_source_package_item_hash"),
+        CheckConstraint("size_bytes > 0", name="ck_agent_source_package_item_size"),
+    )
+
+
+class AgentSourceResearchRun(Base, TimestampMixin):
+    """Persistent web-research operation, independent from historical job rows."""
+
+    __tablename__ = "agent_source_research_run"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    research_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    incident_id: Mapped[int] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    episode_id: Mapped[int] = mapped_column(
+        ForeignKey("episode.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    analysis_window_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_analysis_window.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    state: Mapped[AgentSourceResearchState] = mapped_column(
+        enum_column(AgentSourceResearchState, name="agent_source_research_state"),
+        nullable=False,
+        default=AgentSourceResearchState.QUEUED,
+        index=True,
+    )
+    cutoff_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    location_hint: Mapped[str | None] = mapped_column(String(500))
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_registry_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    upload_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    pathname_prefix: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    query_plan: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    result_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
+    progress_percent: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    remote_job_id: Mapped[str | None] = mapped_column(String(255), unique=True)
+    remote_status: Mapped[str | None] = mapped_column(String(64))
+    lease_owner: Mapped[str | None] = mapped_column(String(255), index=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    poll_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    payload_hash: Mapped[str | None] = mapped_column(String(64))
+    output_hash: Mapped[str | None] = mapped_column(String(64))
+    trace_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    purge_after: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(String(128))
+    last_error_detail: Mapped[str | None] = mapped_column(String(1_000))
+
+    incident: Mapped[IncidentSeries] = relationship(foreign_keys=[incident_id])
+    episode: Mapped[Episode] = relationship(foreign_keys=[episode_id])
+    analysis_window: Mapped[AgentAnalysisWindow] = relationship(
+        back_populates="source_research_runs"
+    )
+    candidates: Mapped[list[AgentSourceCandidate]] = relationship(
+        back_populates="research_run",
+        cascade="all, delete-orphan",
+        order_by="AgentSourceCandidate.id",
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "progress_percent >= 0 AND progress_percent <= 100",
+            name="ck_agent_source_research_progress",
+        ),
+        CheckConstraint("attempt >= 0", name="ck_agent_source_research_attempt"),
+        CheckConstraint("max_attempts >= 1", name="ck_agent_source_research_max_attempts"),
+        CheckConstraint("poll_count >= 0", name="ck_agent_source_research_poll_count"),
+        CheckConstraint(
+            "payload_hash IS NULL OR (" + sha256_hex_check("payload_hash") + ")",
+            name="ck_agent_source_research_payload_hash",
+        ),
+        CheckConstraint(
+            "output_hash IS NULL OR (" + sha256_hex_check("output_hash") + ")",
+            name="ck_agent_source_research_output_hash",
+        ),
+    )
+
+
+class AgentSourceCandidate(Base, TimestampMixin):
+    __tablename__ = "agent_source_candidate"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    research_run_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_source_research_run.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    agent_media_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_media_item.id", ondelete="RESTRICT"), unique=True, index=True
+    )
+    state: Mapped[AgentSourceCandidateState] = mapped_column(
+        enum_column(AgentSourceCandidateState, name="agent_source_candidate_state"),
+        nullable=False,
+        default=AgentSourceCandidateState.DISCOVERED,
+        index=True,
+    )
+    canonical_url: Mapped[str] = mapped_column(String(2_048), nullable=False)
+    canonical_url_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    title: Mapped[str | None] = mapped_column(String(500))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    acquired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    media_type: Mapped[AgentMediaType | None] = mapped_column(
+        enum_column(AgentMediaType, name="agent_source_candidate_media_type")
+    )
+    media_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    object_uri: Mapped[str | None] = mapped_column(String(1_024))
+    excerpt: Mapped[str | None] = mapped_column(Text)
+    license_identifier: Mapped[str | None] = mapped_column(String(128))
+    attribution: Mapped[str | None] = mapped_column(String(500))
+    provenance_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    cutoff_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    duplicate_of_candidate_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_source_candidate.id", ondelete="RESTRICT"), index=True
+    )
+
+    research_run: Mapped[AgentSourceResearchRun] = relationship(back_populates="candidates")
+    duplicate_of: Mapped[AgentSourceCandidate | None] = relationship(
+        remote_side=[id], foreign_keys=[duplicate_of_candidate_id]
+    )
+    agent_media_item: Mapped[AgentMediaItem | None] = relationship(
+        foreign_keys=[agent_media_item_id]
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "research_run_id", "canonical_url_hash", name="uq_agent_source_candidate_run_url"
+        ),
+        CheckConstraint(
+            sha256_hex_check("canonical_url_hash"), name="ck_agent_source_candidate_url_hash"
+        ),
+        CheckConstraint(
+            "media_sha256 IS NULL OR (" + sha256_hex_check("media_sha256") + ")",
+            name="ck_agent_source_candidate_media_hash",
+        ),
+        CheckConstraint("canonical_url LIKE 'https://%'", name="ck_agent_source_candidate_https"),
     )
 
 
@@ -1535,7 +1929,14 @@ class AgentMediaConsent(Base, TimestampMixin):
         ForeignKey("agent_media_item.id", ondelete="CASCADE"), nullable=False, unique=True
     )
     basis: Mapped[AgentConsentBasis] = mapped_column(
-        enum_column(AgentConsentBasis, name="agent_consent_basis"), nullable=False
+        Enum(
+            AgentConsentBasis,
+            name="agent_consent_basis",
+            native_enum=False,
+            validate_strings=True,
+            values_callable=lambda enum_type: [member.value for member in enum_type],
+        ),
+        nullable=False,
     )
     state: Mapped[AgentConsentState] = mapped_column(
         enum_column(AgentConsentState, name="agent_consent_state"), nullable=False, index=True
@@ -1565,6 +1966,10 @@ class AgentMediaConsent(Base, TimestampMixin):
             "basis != 'source_license' OR "
             "(source_reference_url IS NOT NULL AND license_identifier IS NOT NULL)",
             name="ck_agent_consent_source_license",
+        ),
+        CheckConstraint(
+            "basis != 'public_source_analysis' OR source_reference_url IS NOT NULL",
+            name="ck_agent_consent_public_source",
         ),
         CheckConstraint(
             "source_reference_url IS NULL OR source_reference_url LIKE 'https://%'",
@@ -1658,6 +2063,7 @@ class AgentSpatialProposal(Base, TimestampMixin):
     reviewed_by: Mapped[str | None] = mapped_column(String(255))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     review_reason: Mapped[str | None] = mapped_column(String(500))
+
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     analysis_window: Mapped[AgentAnalysisWindow] = relationship(back_populates="spatial_proposals")
@@ -2085,6 +2491,9 @@ class ActiveFireZoneRevision(Base, TimestampMixin):
     episode_id: Mapped[int] = mapped_column(
         ForeignKey("episode.id", ondelete="RESTRICT"), nullable=False, index=True
     )
+    analysis_window_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_analysis_window.id", ondelete="RESTRICT"), index=True
+    )
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
     valid_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     geometry_geojson: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
@@ -2106,14 +2515,57 @@ class ActiveFireZoneRevision(Base, TimestampMixin):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     review_reason: Mapped[str | None] = mapped_column(String(500))
 
+    analysis_window: Mapped[AgentAnalysisWindow | None] = relationship()
+
     __table_args__ = (
         UniqueConstraint("incident_id", "episode_id", "revision", name="uq_active_zone_revision"),
         CheckConstraint("revision >= 1", name="ck_active_zone_revision_positive"),
         CheckConstraint(
-            "geometry_origin IN ('HUMAN_AUTHORED', 'DETERMINISTIC_UNION', 'SATELLITE_PRODUCT')",
+            "geometry_origin IN ('HUMAN_AUTHORED', 'DETERMINISTIC_UNION', "
+            "'SATELLITE_PRODUCT', 'AGENT_DERIVED')",
             name="ck_active_zone_geometry_origin",
         ),
         CheckConstraint("length(reason) >= 10", name="ck_active_zone_reason"),
+    )
+
+
+class IncidentMapCapture(Base, TimestampMixin):
+    """Human-published 3D map capture tied to one reviewed geographic layer."""
+
+    __tablename__ = "incident_map_capture"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    capture_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    incident_id: Mapped[int] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    episode_id: Mapped[int] = mapped_column(
+        ForeignKey("episode.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    active_zone_revision_id: Mapped[int] = mapped_column(
+        ForeignKey("active_fire_zone_revision.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    local_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    object_uri: Mapped[str] = mapped_column(String(2_048), nullable=False, unique=True)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    media_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    width_px: Mapped[int] = mapped_column(Integer, nullable=False)
+    height_px: Mapped[int] = mapped_column(Integer, nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    active_zone_revision: Mapped[ActiveFireZoneRevision] = relationship()
+
+    __table_args__ = (
+        CheckConstraint(sha256_hex_check("sha256"), name="ck_map_capture_sha256"),
+        CheckConstraint("size_bytes > 0", name="ck_map_capture_size"),
+        CheckConstraint(
+            "media_type IN ('image/jpeg', 'image/png')", name="ck_map_capture_media_type"
+        ),
+        CheckConstraint("width_px >= 640 AND height_px >= 360", name="ck_map_capture_dimensions"),
     )
 
 

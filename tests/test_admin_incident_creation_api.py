@@ -9,19 +9,19 @@ from fire_viewer.services.admin_incident_creation import ADMIN_PLACEMENT_ACCURAC
 
 def test_admin_creates_private_monitoring_incident_visible_on_map(client, session) -> None:
     payload = {
-        "territory_code": "99",
-        "latitude": 46.0002,
+        "territory_code": "26",
+        "latitude": 44.7532,
         "longitude": 5.3701,
-        "canonical_name": "Massif de secteur synthétique",
+        "canonical_name": "Massif de Justin",
     }
-    headers = {"Idempotency-Key": "admin-create-synthetic-zone-0001"}
+    headers = {"Idempotency-Key": "admin-create-die-0001"}
 
     response = client.post("/api/v2/admin/incidents", json=payload, headers=headers)
 
     assert response.status_code == 201
     assert response.headers["Idempotent-Replay"] == "false"
     body = response.json()
-    assert body["fire_id"] == "FR-99-00001"
+    assert body["fire_id"] == "FR-26-00001"
     assert body["episode_id"] == "E01"
     assert body["status"] == IncidentStatus.MONITORING
     assert body["verification_state"] == VerificationState.UNVERIFIED

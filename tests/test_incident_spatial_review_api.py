@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select
 
 from fire_viewer.db.models import (
+    Episode,
     IncidentSpatialMarker,
     ManifestRevision,
     ModelAsset,
@@ -195,6 +196,61 @@ def test_admin_3d_workspace_edits_merges_and_approves_without_publishing(
     )
     assert retracted.status_code == 200, retracted.text
     assert retracted.json()["review_state"] == "REJECTED"
+
+
+def test_previous_episode_marker_cannot_support_the_current_activity_zone(
+    client, session, seed_incident
+) -> None:
+    incident, previous_episode = seed_incident(
+        fire_id="FR-83-00503", sequence=503, lon=6.0214, lat=43.2897
+    )
+    previous_episode.is_current = False
+    now = datetime.now(UTC)
+    current_episode = Episode(
+        incident_id=incident.id,
+        episode_id="E02",
+        ordinal=2,
+        status=previous_episode.status,
+        verification_state=previous_episode.verification_state,
+        evidence_basis_at=now,
+        review_required=False,
+        is_current=True,
+        confidence_policy="g1-default-v1",
+        started_at=now,
+        last_observed_at=now,
+        version=1,
+    )
+    session.add(current_episode)
+    session.add(
+        IncidentSpatialMarker(
+            marker_id="IM-previous-episode",
+            incident_id=incident.id,
+            episode_id=previous_episode.id,
+            marker_type="media_capture",
+            longitude=6.0218,
+            latitude=43.2899,
+            horizontal_accuracy_m=12,
+            geometry_origin="METADATA",
+            review_state=IncidentMarkerReviewState.VALIDATED,
+            spatial_display_allowed=False,
+            version=1,
+        )
+    )
+    session.commit()
+
+    response = client.post(
+        f"/api/v1/admin/incidents/{incident.fire_id}/active-zone-revisions",
+        json={
+            "expected_latest_revision": 0,
+            "valid_at": now.isoformat(),
+            "geometry_geojson": _square(6.020, 43.288, 6.022, 43.290),
+            "supporting_marker_ids": ["IM-previous-episode"],
+            "reason": "Vérification du cloisonnement strict entre deux épisodes distincts.",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["type"].endswith("active_zone_unknown_marker")
 
 
 def test_invalid_self_intersection_is_rejected_instead_of_silently_repaired(

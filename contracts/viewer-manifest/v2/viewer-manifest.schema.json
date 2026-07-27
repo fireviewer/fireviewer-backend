@@ -172,15 +172,13 @@
             "$ref": "#/$defs/ManifestSpatialSceneFile"
           },
           "maxItems": 2000,
-          "minItems": 1,
           "title": "Files",
           "type": "array"
         }
       },
       "required": [
         "package_id",
-        "catalog_url",
-        "files"
+        "catalog_url"
       ],
       "title": "ManifestSpatialScene",
       "type": "object"

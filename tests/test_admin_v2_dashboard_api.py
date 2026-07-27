@@ -148,7 +148,7 @@ def test_versioned_admin_read_routes_share_the_same_persisted_state(client, seed
     )
 
     incidents = client.get("/api/v2/admin/incidents")
-    queue = client.get("/api/v2/admin/work-queue")
+    queue = client.get("/api/v2/admin/work-queue?category=incident&limit=1")
 
     assert incidents.status_code == 200
     assert incidents.headers["Cache-Control"] == "no-store"
@@ -156,3 +156,15 @@ def test_versioned_admin_read_routes_share_the_same_persisted_state(client, seed
     assert queue.status_code == 200
     assert queue.headers["Cache-Control"] == "no-store"
     assert queue.json()["incidents"][0]["fire_id"] == incident.fire_id
+    assert queue.json()["generated_at"] is not None
+    assert queue.json()["summary"]["total"] >= 1
+    assert queue.json()["summary"]["by_category"]["incident"] == 1
+    assert queue.json()["page"] == {
+        "limit": 1,
+        "returned": 1,
+        "next_cursor": None,
+        "total_filtered": 1,
+    }
+    decision = next(item for item in queue.json()["items"] if item["category"] == "incident")
+    assert decision["fire_id"] == incident.fire_id
+    assert "payload" not in decision

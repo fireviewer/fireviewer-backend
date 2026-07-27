@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -224,7 +224,10 @@ class ManifestSpatialSceneFile(StrictModel):
 class ManifestSpatialScene(StrictModel):
     package_id: str = Field(min_length=3, max_length=96)
     catalog_url: str = Field(min_length=1, max_length=1_000)
-    files: list[ManifestSpatialSceneFile] = Field(min_length=1, max_length=2_000)
+    # The manifest is the first public response for an incident.  Keep it
+    # deliberately small: spatial file URLs are disclosed only by the explicit
+    # scene bootstrap endpoint after the visitor asks to open the 3D view.
+    files: list[ManifestSpatialSceneFile] = Field(default_factory=list, max_length=2_000)
 
 
 class ManifestFrame(StrictModel):
@@ -349,7 +352,7 @@ class PublicIncidentGalleryItem(StrictModel):
     title: str = Field(min_length=1, max_length=255)
     caption: str | None = Field(default=None, max_length=1000)
     alt_text: str = Field(min_length=1, max_length=500)
-    media_url: str = Field(min_length=9, max_length=2048, pattern=r"^https://")
+    media_url: str | None = Field(default=None, min_length=9, max_length=2048, pattern=r"^https://")
     media_kind: GalleryMediaKind
     credit: str | None = Field(default=None, max_length=255)
     license_label: str | None = Field(default=None, max_length=255)
@@ -418,6 +421,23 @@ class PublicDownload(StrictModel):
     url: str = Field(min_length=1, max_length=255)
 
 
+class PublicActiveFireZone(StrictModel):
+    zone_revision_id: str = Field(min_length=1, max_length=96)
+    revision: int = Field(ge=1)
+    valid_at: datetime
+    geometry_geojson: dict[str, object]
+
+
+class PublicIncidentMapCapture(StrictModel):
+    capture_id: str = Field(min_length=1, max_length=128)
+    zone_revision_id: str = Field(min_length=1, max_length=128)
+    local_date: date
+    captured_at: datetime
+    image_url: str = Field(min_length=1, max_length=255)
+    width_px: int = Field(ge=640)
+    height_px: int = Field(ge=360)
+
+
 class PublicIncidentView(StrictModel):
     schema_version: Literal["1.0"] = "1.0"
     fire_id: str
@@ -436,6 +456,8 @@ class PublicIncidentView(StrictModel):
     episodes: list[EpisodeSummary] = Field(default_factory=list)
     observations: list[PublicObservationSummary] = Field(default_factory=list)
     evidence_projections: list[PublicEvidenceProjection] = Field(default_factory=list)
+    active_fire_zone: PublicActiveFireZone | None = None
+    map_gallery: list[PublicIncidentMapCapture] = Field(default_factory=list, max_length=1_000)
     gallery: list[PublicIncidentGalleryItem] = Field(default_factory=list, max_length=120)
     official_resources: list[PublicOfficialResource] = Field(default_factory=list, max_length=80)
     operational_information: list[PublicOperationalInformation] = Field(
@@ -687,14 +709,16 @@ class AdminIncidentGalleryItem(StrictModel):
     title: str = Field(min_length=1, max_length=255)
     caption: str | None = Field(default=None, max_length=1000)
     alt_text: str = Field(min_length=1, max_length=500)
-    media_url: str = Field(min_length=9, max_length=2048, pattern=r"^https://")
+    media_url: str | None = Field(default=None, min_length=9, max_length=2048, pattern=r"^https://")
     media_kind: GalleryMediaKind
     credit: str | None = Field(default=None, max_length=255)
     license_label: str | None = Field(default=None, max_length=255)
     captured_at: datetime | None = None
     published_at: datetime | None = None
     state: GalleryItemState
-    source_reference_url: str = Field(min_length=9, max_length=2048, pattern=r"^https://")
+    source_reference_url: str | None = Field(
+        default=None, min_length=9, max_length=2048, pattern=r"^https://"
+    )
     proposal_reason: str = Field(min_length=1, max_length=1000)
     proposed_by: str = Field(min_length=1, max_length=255)
     proposed_at: datetime
@@ -727,89 +751,6 @@ class AdminIncidentGalleryReviewRequest(StrictModel):
     action: Literal["publish", "reject", "retire"]
     reason: str = Field(min_length=4, max_length=500)
     expected_version: int = Field(ge=1)
-
-
-class AdminPublicationCheck(StrictModel):
-    code: str = Field(min_length=1, max_length=96)
-    label: str = Field(min_length=1, max_length=255)
-    satisfied: bool
-
-
-class AdminIncidentPublicationDomain(StrictModel):
-    domain: Literal["bulletin", "gallery", "spatial"]
-    state: str = Field(min_length=1, max_length=64)
-    preview_available: bool
-    destination: str = Field(min_length=1, max_length=512)
-    action: str | None = Field(default=None, max_length=128)
-    checks: list[AdminPublicationCheck] = Field(default_factory=list, max_length=20)
-    blockers: list[str] = Field(default_factory=list, max_length=20)
-
-
-class AdminIncidentPublicationStatus(StrictModel):
-    fire_id: str
-    generated_at: datetime
-    bulletin: AdminIncidentPublicationDomain
-    gallery: AdminIncidentPublicationDomain
-    spatial: AdminIncidentPublicationDomain
-
-
-class AdminIncidentBulletinUpdateRequest(StrictModel):
-    source_key: str = Field(min_length=1, max_length=128)
-    expected_version: int = Field(ge=1)
-    canonical_name: str | None = Field(default=None, min_length=1, max_length=255)
-    public_note: str | None = Field(default=None, min_length=1, max_length=500)
-    reason: str = Field(min_length=10, max_length=500)
-
-    @model_validator(mode="after")
-    def require_change(self) -> AdminIncidentBulletinUpdateRequest:
-        if self.canonical_name is None and self.public_note is None:
-            raise ValueError("canonical_name or public_note is required")
-        return self
-
-
-class AdminIncidentBulletinUpdateResponse(StrictModel):
-    fire_id: str
-    canonical_name: str | None = None
-    public_note: str | None = None
-    source_key: str
-    validated_at: datetime
-    version: int = Field(ge=1)
-
-
-class AdminIncidentBulletinEntry(StrictModel):
-    entry_id: str = Field(min_length=1, max_length=96)
-    episode_id: str | None = None
-    source_key: str = Field(min_length=1, max_length=128)
-    kind: Literal["fact", "timeline"]
-    body: str = Field(min_length=1, max_length=1_000)
-    effective_at: datetime
-    published_at: datetime
-    retired_at: datetime | None = None
-    state: Literal["PUBLISHED", "RETIRED"]
-    reason: str = Field(min_length=1, max_length=500)
-    created_by: str = Field(min_length=1, max_length=255)
-    retired_by: str | None = None
-    retirement_reason: str | None = Field(default=None, max_length=500)
-    version: int = Field(ge=1)
-
-
-class AdminIncidentBulletinEntriesResponse(StrictModel):
-    fire_id: str
-    entries: list[AdminIncidentBulletinEntry] = Field(default_factory=list, max_length=500)
-
-
-class AdminIncidentBulletinEntryCreateRequest(StrictModel):
-    episode_id: str | None = Field(default=None, min_length=1, max_length=16)
-    source_key: str = Field(min_length=1, max_length=128)
-    kind: Literal["fact", "timeline"]
-    body: str = Field(min_length=1, max_length=1_000)
-    effective_at: datetime
-    reason: str = Field(min_length=10, max_length=500)
-
-
-class AdminIncidentBulletinEntryRetireRequest(StrictModel):
-    expected_version: int = Field(ge=1)
-    reason: str = Field(min_length=10, max_length=500)
 
 
 class AdminIncidentOperationalInformation(StrictModel):
@@ -951,7 +892,61 @@ class AdminWorkQueueIncident(StrictModel):
     version: int = Field(ge=1)
 
 
+class AdminWorkQueueSummary(StrictModel):
+    """Canonical, private totals for the operator decision inbox."""
+
+    total: int = Field(ge=0)
+    by_priority: dict[str, int] = Field(default_factory=dict)
+    by_category: dict[str, int] = Field(default_factory=dict)
+
+
+class AdminWorkQueueItem(StrictModel):
+    """Safe projection of one human decision, deliberately without source payloads."""
+
+    item_id: str = Field(min_length=3, max_length=192)
+    target_id: str = Field(min_length=1, max_length=128)
+    category: Literal[
+        "observation",
+        "incident",
+        "public_report",
+        "public_contribution",
+        "agent_review",
+        "agent_fact_proposal",
+        "agent_spatial_proposal",
+        "agent_report_revision",
+        "spatial_marker",
+        "spatial_revision",
+        "official_resource",
+        "operational_information",
+        "gallery",
+        "spatial_package",
+        "publication",
+    ]
+    priority: Literal["critical", "high", "normal"]
+    state: str = Field(min_length=1, max_length=64)
+    fire_id: str | None = Field(default=None, max_length=32)
+    episode_id: str | None = Field(default=None, max_length=16)
+    zone_id: str | None = Field(default=None, max_length=64)
+    zone_revision: int | None = Field(default=None, ge=1)
+    title: str = Field(min_length=1, max_length=255)
+    detail: str | None = Field(default=None, max_length=500)
+    action_at: datetime
+
+
+class AdminWorkQueuePage(StrictModel):
+    limit: int = Field(ge=1, le=100)
+    returned: int = Field(ge=0)
+    next_cursor: str | None = Field(default=None, max_length=64)
+    total_filtered: int = Field(ge=0)
+
+
 class AdminWorkQueueResponse(StrictModel):
+    """Transition-safe response: legacy lists stay private while the inbox uses items."""
+
+    generated_at: datetime | None = None
+    summary: AdminWorkQueueSummary | None = None
+    items: list[AdminWorkQueueItem] = Field(default_factory=list, max_length=100)
+    page: AdminWorkQueuePage | None = None
     observations: list[AdminWorkQueueObservation] = Field(default_factory=list, max_length=200)
     reports: list[PublicIncidentReport] = Field(default_factory=list, max_length=200)
     incidents: list[AdminWorkQueueIncident] = Field(default_factory=list, max_length=200)
@@ -1683,3 +1678,86 @@ class PublicZoneContributionRequest(StrictModel):
 class PublicZoneContributionReceipt(StrictModel):
     contribution_id: str
     status: Literal["received"] = "received"
+
+
+class AdminPublicationCheck(StrictModel):
+    code: str = Field(min_length=1, max_length=96)
+    label: str = Field(min_length=1, max_length=255)
+    satisfied: bool
+
+
+class AdminIncidentPublicationDomain(StrictModel):
+    domain: Literal["bulletin", "gallery", "spatial"]
+    state: str = Field(min_length=1, max_length=64)
+    preview_available: bool
+    destination: str = Field(min_length=1, max_length=512)
+    action: str | None = Field(default=None, max_length=128)
+    checks: list[AdminPublicationCheck] = Field(default_factory=list, max_length=20)
+    blockers: list[str] = Field(default_factory=list, max_length=20)
+
+
+class AdminIncidentPublicationStatus(StrictModel):
+    fire_id: str
+    generated_at: datetime
+    bulletin: AdminIncidentPublicationDomain
+    gallery: AdminIncidentPublicationDomain
+    spatial: AdminIncidentPublicationDomain
+
+
+class AdminIncidentBulletinUpdateRequest(StrictModel):
+    source_key: str = Field(min_length=1, max_length=128)
+    expected_version: int = Field(ge=1)
+    canonical_name: str | None = Field(default=None, min_length=1, max_length=255)
+    public_note: str | None = Field(default=None, min_length=1, max_length=500)
+    reason: str = Field(min_length=10, max_length=500)
+
+    @model_validator(mode="after")
+    def require_change(self) -> AdminIncidentBulletinUpdateRequest:
+        if self.canonical_name is None and self.public_note is None:
+            raise ValueError("canonical_name or public_note is required")
+        return self
+
+
+class AdminIncidentBulletinUpdateResponse(StrictModel):
+    fire_id: str
+    canonical_name: str | None = None
+    public_note: str | None = None
+    source_key: str
+    validated_at: datetime
+    version: int = Field(ge=1)
+
+
+class AdminIncidentBulletinEntry(StrictModel):
+    entry_id: str = Field(min_length=1, max_length=96)
+    episode_id: str | None = None
+    source_key: str = Field(min_length=1, max_length=128)
+    kind: Literal["fact", "timeline"]
+    body: str = Field(min_length=1, max_length=1_000)
+    effective_at: datetime
+    published_at: datetime
+    retired_at: datetime | None = None
+    state: Literal["PUBLISHED", "RETIRED"]
+    reason: str = Field(min_length=1, max_length=500)
+    created_by: str = Field(min_length=1, max_length=255)
+    retired_by: str | None = None
+    retirement_reason: str | None = Field(default=None, max_length=500)
+    version: int = Field(ge=1)
+
+
+class AdminIncidentBulletinEntriesResponse(StrictModel):
+    fire_id: str
+    entries: list[AdminIncidentBulletinEntry] = Field(default_factory=list, max_length=500)
+
+
+class AdminIncidentBulletinEntryCreateRequest(StrictModel):
+    episode_id: str | None = Field(default=None, min_length=1, max_length=16)
+    source_key: str = Field(min_length=1, max_length=128)
+    kind: Literal["fact", "timeline"]
+    body: str = Field(min_length=1, max_length=1_000)
+    effective_at: datetime
+    reason: str = Field(min_length=10, max_length=500)
+
+
+class AdminIncidentBulletinEntryRetireRequest(StrictModel):
+    expected_version: int = Field(ge=1)
+    reason: str = Field(min_length=10, max_length=500)

@@ -21,12 +21,7 @@ def upgrade() -> None:
         "incident_gallery_item",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("gallery_item_id", sa.String(length=96), nullable=False, unique=True),
-        sa.Column(
-            "incident_id",
-            sa.Integer(),
-            sa.ForeignKey("incident_series.id", ondelete="RESTRICT"),
-            nullable=False,
-        ),
+        sa.Column("incident_id", sa.Integer(), sa.ForeignKey("incident_series.id", ondelete="RESTRICT"), nullable=False),
         sa.Column("episode_id", sa.Integer(), sa.ForeignKey("episode.id", ondelete="RESTRICT")),
         sa.Column("title", sa.String(length=255), nullable=False),
         sa.Column("caption", sa.String(length=1000)),
@@ -49,36 +44,16 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("media_kind IN ('image', 'video')", name="ck_gallery_item_media_kind"),
-        sa.CheckConstraint(
-            "state IN ('PROPOSED', 'PUBLISHED', 'REJECTED', 'RETIRED')",
-            name="ck_gallery_item_state",
-        ),
+        sa.CheckConstraint("state IN ('PROPOSED', 'PUBLISHED', 'REJECTED', 'RETIRED')", name="ck_gallery_item_state"),
         sa.CheckConstraint("media_url LIKE 'https://%'", name="ck_gallery_item_media_https"),
-        sa.CheckConstraint(
-            "source_reference_url LIKE 'https://%'", name="ck_gallery_item_source_https"
-        ),
+        sa.CheckConstraint("source_reference_url LIKE 'https://%'", name="ck_gallery_item_source_https"),
         sa.CheckConstraint("version >= 1", name="ck_gallery_item_version"),
     )
-    op.create_index(
-        "ix_incident_gallery_item_gallery_item_id",
-        "incident_gallery_item",
-        ["gallery_item_id"],
-        unique=True,
-    )
-    op.create_index(
-        "ix_incident_gallery_item_incident_id",
-        "incident_gallery_item",
-        ["incident_id"],
-    )
-    op.create_index(
-        "ix_incident_gallery_item_episode_id",
-        "incident_gallery_item",
-        ["episode_id"],
-    )
+    op.create_index("ix_incident_gallery_item_gallery_item_id", "incident_gallery_item", ["gallery_item_id"], unique=True)
+    op.create_index("ix_incident_gallery_item_incident_id", "incident_gallery_item", ["incident_id"])
+    op.create_index("ix_incident_gallery_item_episode_id", "incident_gallery_item", ["episode_id"])
     op.create_index("ix_incident_gallery_item_state", "incident_gallery_item", ["state"])
-    op.create_index(
-        "ix_gallery_item_incident_state", "incident_gallery_item", ["incident_id", "state"]
-    )
+    op.create_index("ix_gallery_item_incident_state", "incident_gallery_item", ["incident_id", "state"])
 
 
 def downgrade() -> None:

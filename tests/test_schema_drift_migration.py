@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 
+from fire_viewer.core.config import Settings
 from fire_viewer.db.sqlite_invariants import SQLITE_CRITICAL_TRIGGERS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PRE_NORMALIZATION_REVISION = "f3b8c1d7a920"
 NORMALIZATION_REVISION = "a4e9c2f7d610"
+PRE_SOURCE_INGESTION_REVISION = "e1c7a9b4d620"
+SOURCE_INGESTION_REVISION = "f9c8b7a6d510"
+CURRENT_SCHEMA_REVISION = "ca3d7e9f2b61"
+
+
+def test_runtime_and_vercel_expect_the_current_schema_revision() -> None:
+    vercel_config = json.loads((PROJECT_ROOT / "vercel.json").read_text(encoding="utf-8"))
+
+    assert Settings().database_schema_revision == CURRENT_SCHEMA_REVISION
+    assert "buildCommand" not in vercel_config
+    assert vercel_config["env"]["FV_DATABASE_SCHEMA_REVISION"] == CURRENT_SCHEMA_REVISION
 
 
 def _config(database_path: Path) -> Config:
@@ -90,3 +103,73 @@ def test_normalization_migration_resolves_all_three_autogenerate_drifts(tmp_path
         engine.dispose()
 
     command.downgrade(config, "base")
+
+
+def test_source_ingestion_migration_normalizes_existing_consent_values(tmp_path: Path) -> None:
+    database_path = tmp_path / "source-consent.db"
+    config = _config(database_path)
+    command.upgrade(config, PRE_SOURCE_INGESTION_REVISION)
+
+    engine = create_engine(f"sqlite:///{database_path}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO agent_media_batch "
+                    "(id, batch_id, schema_version, batch_type, priority, state, "
+                    "idempotency_key, request_hash, trace_id, purge_after, created_at, updated_at) "
+                    "VALUES (1, 'batch-legacy-consent', '1.0', 'user_media', 'scheduled', "
+                    "'DRAFT', 'legacy-consent', :digest, 'trace-legacy-consent', :timestamp, "
+                    ":timestamp, :timestamp)"
+                ),
+                {"digest": "0" * 64, "timestamp": "2030-01-01 00:00:00"},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO agent_media_item "
+                    "(id, batch_id, input_id, media_type, metadata_payload, "
+                    "processable_payload, preprocessing_status, purge_after, "
+                    "created_at, updated_at) "
+                    "VALUES (1, 1, 'legacy-input', 'image', '{}', '{}', 'pending', "
+                    ":timestamp, :timestamp, :timestamp)"
+                ),
+                {"timestamp": "2030-01-01 00:00:00"},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO agent_media_consent "
+                    "(id, item_id, basis, state, scopes, terms_version, evidence_sha256, "
+                    "granted_at, created_at, updated_at) "
+                    "VALUES (1, 1, 'EXPLICIT_UPLOAD', 'GRANTED', '[\"analysis\"]', "
+                    "'legacy-v1', :digest, :timestamp, :timestamp, :timestamp)"
+                ),
+                {"digest": "1" * 64, "timestamp": "2026-07-19 00:00:00"},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, SOURCE_INGESTION_REVISION)
+    engine = create_engine(f"sqlite:///{database_path}")
+    try:
+        with engine.connect() as connection:
+            assert connection.scalar(
+                text("SELECT basis FROM agent_media_consent WHERE id = 1")
+            ) == ("explicit_upload")
+        basis_column = next(
+            column
+            for column in inspect(engine).get_columns("agent_media_consent")
+            if column["name"] == "basis"
+        )
+        assert basis_column["type"].length == len("public_source_analysis")
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, PRE_SOURCE_INGESTION_REVISION)
+    engine = create_engine(f"sqlite:///{database_path}")
+    try:
+        with engine.connect() as connection:
+            assert connection.scalar(
+                text("SELECT basis FROM agent_media_consent WHERE id = 1")
+            ) == ("EXPLICIT_UPLOAD")
+    finally:
+        engine.dispose()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 from datetime import timedelta
 from typing import Annotated, Literal
 
@@ -21,6 +22,7 @@ from fire_viewer.core.time import utcnow
 from fire_viewer.db.models import (
     AdminLocalSession,
     AdminLoginAttempt,
+    IncidentMapCapture,
     IncidentSeries,
     ManifestRevision,
     SpatialPackage,
@@ -45,11 +47,14 @@ from fire_viewer.domain.incident_spatial_schemas import (
     ActiveFireZoneRevisionCreateRequest,
     AdminActiveFireZoneRevision,
     AdminAgentReviewPackage,
+    AdminIncidentMapCapture,
     AdminIncidentSpatialMarker,
     AdminIncidentSpatialReviewWorkspace,
     AgentReviewResolutionRequest,
     IncidentGltfPickRequest,
     IncidentGltfPickResponse,
+    IncidentMapCaptureFinalizeRequest,
+    IncidentMapCaptureUploadGrantRequest,
     IncidentMarkerReviewRequest,
 )
 from fire_viewer.domain.schemas import (
@@ -150,9 +155,15 @@ from fire_viewer.services.admin_observability import (
     list_global_audit,
 )
 from fire_viewer.services.blob_uploads import (
+    ALLOWED_GALLERY_CONTENT_TYPES,
     ALLOWED_PACKAGE_CONTENT_TYPES,
+    INCIDENT_GALLERY_MAX_BYTES,
     create_blob_upload_grant,
     issue_blob_client_token,
+)
+from fire_viewer.services.incident_gallery import (
+    finalize_map_capture,
+    grant_map_capture_upload,
 )
 from fire_viewer.services.incident_spatial_review import (
     create_zone_revision as create_active_zone_revision_service,
@@ -817,6 +828,96 @@ def get_incident_spatial_review(
     _require_admin(actor)
     _set_admin_read_headers(response)
     return get_spatial_review_workspace(session, fire_id=fire_id)
+
+
+@router.get("/incidents/{fire_id}/map-gallery/{capture_id}")
+def get_incident_map_capture(
+    fire_id: str,
+    capture_id: str,
+    actor: ActorDep,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> Response:
+    _require_admin(actor)
+    capture = session.execute(
+        select(IncidentMapCapture)
+        .join(IncidentSeries, IncidentSeries.id == IncidentMapCapture.incident_id)
+        .where(
+            IncidentSeries.fire_id == fire_id,
+            IncidentMapCapture.capture_id == capture_id,
+        )
+    ).scalar_one_or_none()
+    if capture is None:
+        raise NotFoundError("incident_map_capture", capture_id)
+    store = build_object_store(settings)
+    try:
+        metadata = store.head(capture.object_uri)
+        content = store.read_bytes(capture.object_uri)
+    except ObjectStorageError as exc:
+        raise NotFoundError("incident_map_capture", capture_id) from exc
+    if metadata.size_bytes != capture.size_bytes or not hmac.compare_digest(
+        hashlib.sha256(content).hexdigest(), capture.sha256
+    ):
+        raise ConflictError("map_capture_integrity_failed", "The map capture is inconsistent.")
+    return Response(
+        content=content,
+        media_type=capture.media_type,
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
+@router.post(
+    "/incidents/{fire_id}/map-gallery/upload-grant",
+    response_model=AdminBlobUploadGrantResponse,
+    status_code=201,
+)
+def grant_incident_map_capture_upload(
+    fire_id: str,
+    payload: IncidentMapCaptureUploadGrantRequest,
+    actor: ActorDep,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> AdminBlobUploadGrantResponse:
+    _require_admin(actor)
+    grant = grant_map_capture_upload(
+        session,
+        fire_id=fire_id,
+        payload=payload,
+        actor=actor,
+        settings=settings,
+    )
+    return AdminBlobUploadGrantResponse(
+        upload_id=grant.upload_id,
+        pathname_prefix=grant.pathname_prefix,
+        upload_grant=grant.token,
+        expires_at=grant.expires_at,
+        maximum_file_size_bytes=INCIDENT_GALLERY_MAX_BYTES,
+        allowed_content_types=list(ALLOWED_GALLERY_CONTENT_TYPES),
+    )
+
+
+@router.post(
+    "/incidents/{fire_id}/map-gallery/from-blob",
+    response_model=AdminIncidentMapCapture,
+    status_code=201,
+)
+def finalize_incident_map_capture(
+    fire_id: str,
+    payload: IncidentMapCaptureFinalizeRequest,
+    actor: ActorDep,
+    session: SessionDep,
+    settings: SettingsDep,
+    trace_id: TraceIdDep,
+) -> AdminIncidentMapCapture:
+    _require_admin(actor)
+    return finalize_map_capture(
+        session,
+        fire_id=fire_id,
+        payload=payload,
+        actor=actor,
+        settings=settings,
+        trace_id=trace_id,
+    )
 
 
 @router.post(

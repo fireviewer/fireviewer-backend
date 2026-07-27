@@ -53,6 +53,8 @@ class ObjectStore(Protocol):
 
     def uri_for(self, key: str) -> str: ...
 
+    def uri_for_pathname(self, pathname: str) -> str: ...
+
     def finalize_tree(self, source_dir: Path, key: str) -> None: ...
 
     def delete_tree(self, key: str) -> None: ...
@@ -80,6 +82,9 @@ class LocalObjectStore:
 
     def uri_for(self, key: str) -> str:
         return f"local://{_safe_key(key)}"
+
+    def uri_for_pathname(self, pathname: str) -> str:
+        return f"local://{_safe_key(pathname)}"
 
     def finalize_tree(self, source_dir: Path, key: str) -> None:
         destination = self._path_for(key)
@@ -146,6 +151,12 @@ class VercelBlobObjectStore:
 
     def uri_for(self, key: str) -> str:
         return f"vercel-blob://{self._blob_key(key)}"
+
+    def uri_for_pathname(self, pathname: str) -> str:
+        safe_pathname = _safe_key(pathname)
+        if not safe_pathname.startswith(f"{self.prefix}/"):
+            raise ObjectStorageError("Object is outside the configured Blob prefix.")
+        return f"vercel-blob://{safe_pathname}"
 
     def finalize_tree(self, source_dir: Path, key: str) -> None:
         base_key = self._blob_key(key)

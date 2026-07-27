@@ -59,6 +59,13 @@ def test_blob_token_accepts_vercel_marketplace_variable(monkeypatch: pytest.Monk
     assert settings.blob_read_write_token.get_secret_value() == "vercel-marketplace-token"
 
 
+def test_cron_secret_accepts_vercel_native_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CRON_SECRET", "x" * 40)
+    settings = Settings(_env_file=None)
+    assert settings.cron_secret is not None
+    assert settings.cron_secret.get_secret_value() == "x" * 40
+
+
 def test_direct_pod_dispatch_requires_a_long_token_and_https() -> None:
     with pytest.raises(ValidationError, match="at least 32 items"):
         Settings(
@@ -207,7 +214,7 @@ def test_readiness_requires_current_schema_and_spatial_runtime(client, session) 
     assert ready.json() == {
         "status": "ready",
         "database": "ok",
-        "schema_revision": "d8f3a1c5b720",
+        "schema_revision": "ca3d7e9f2b61",
         "spatial_index": "ok",
     }
 

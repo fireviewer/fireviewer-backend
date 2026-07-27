@@ -8,6 +8,7 @@ import time
 from fire_viewer.core.config import get_settings
 from fire_viewer.db.engine import create_db_engine, create_session_factory
 from fire_viewer.services.agent_dispatcher import build_runpod_client, run_dispatcher_once
+from fire_viewer.services.public_contribution_schedule import run_public_contribution_schedule_once
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +28,10 @@ def main() -> None:
     try:
         with build_runpod_client(settings) as client:
             while True:
+                with factory() as schedule_session:
+                    run_public_contribution_schedule_once(
+                        schedule_session, worker_id=worker_id, settings=settings
+                    )
                 processed = run_dispatcher_once(
                     factory,
                     worker_id=worker_id,

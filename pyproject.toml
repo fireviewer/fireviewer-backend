@@ -24,6 +24,7 @@ dependencies = [
   "prometheus-client==0.25.0",
   "pyproj==3.7.2",
   "shapely==2.1.2",
+  "pillow==12.1.1",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +45,7 @@ fire-viewer-restore = "fire_viewer.scripts.restore_sqlite:main"
 fire-viewer-check-migrations = "fire_viewer.scripts.check_migrations:main"
 fire-viewer-hash-admin-password = "fire_viewer.scripts.hash_admin_password:main"
 fire-viewer-agent-dispatcher = "fire_viewer.scripts.run_agent_dispatcher:main"
+fire-viewer-compare-activity-zone = "fire_viewer.scripts.compare_activity_zone:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

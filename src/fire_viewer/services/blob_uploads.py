@@ -33,9 +33,51 @@ ALLOWED_PACKAGE_CONTENT_TYPES = (
     "image/geotiff",
     "model/gltf-binary",
 )
+ALLOWED_SOURCE_CONTENT_TYPES = (
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/tiff",
+    "video/mp4",
+    "video/quicktime",
+    "video/webm",
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/ogg",
+    "text/plain",
+    "text/markdown",
+    "text/html",
+)
+ALLOWED_GALLERY_CONTENT_TYPES = ("image/jpeg", "image/png")
+INCIDENT_GALLERY_MAX_BYTES = 8 * 1_024 * 1_024
 _ALLOWED_SUFFIXES = frozenset(
     {".json", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".glb", ".fwtile", ".fwterrain"}
 )
+_ALLOWED_SOURCE_SUFFIXES = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".tif",
+        ".tiff",
+        ".mp4",
+        ".mov",
+        ".webm",
+        ".mp3",
+        ".m4a",
+        ".wav",
+        ".ogg",
+        ".txt",
+        ".md",
+        ".html",
+        ".htm",
+    }
+)
+_ALLOWED_GALLERY_SUFFIXES = frozenset({".jpg", ".png"})
+_ALLOWED_PUBLIC_CONTRIBUTION_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +124,82 @@ def create_blob_upload_grant(
             "package_id": payload.package_id,
             "file_count": payload.file_count,
             "total_size_bytes": payload.total_size_bytes,
+            "purpose": "spatial_package",
+        },
+        token,
+        algorithm="HS256",
+    )
+    return BlobUploadGrant(upload_id, pathname_prefix, grant, expires_at)
+
+
+def create_source_blob_upload_grant(
+    *,
+    package_id: str,
+    file_count: int,
+    total_size_bytes: int,
+    actor: Actor,
+    settings: Settings,
+    upload_id: str | None = None,
+    purpose: str = "source_package",
+) -> BlobUploadGrant:
+    token = _read_write_token(settings)
+    if file_count > settings.agent_source_package_max_files:
+        raise BadRequestError("too_many_source_files", "The source package has too many files.")
+    if total_size_bytes > settings.agent_source_package_max_total_bytes:
+        raise BadRequestError("source_package_too_large", "The source package is too large.")
+    upload_id = upload_id or uuid4().hex
+    pathname_prefix = build_object_store(settings).pathname_for(f"source-packages/{upload_id}")
+    now = utcnow()
+    expires_at = now + timedelta(minutes=settings.blob_upload_grant_minutes)
+    grant = jwt.encode(
+        {
+            "iss": BLOB_UPLOAD_GRANT_ISSUER,
+            "aud": BLOB_UPLOAD_GRANT_AUDIENCE,
+            "sub": actor.actor_id,
+            "iat": now,
+            "exp": expires_at,
+            "upload_id": upload_id,
+            "pathname_prefix": pathname_prefix,
+            "package_id": package_id,
+            "file_count": file_count,
+            "total_size_bytes": total_size_bytes,
+            "purpose": purpose,
+        },
+        token,
+        algorithm="HS256",
+    )
+    return BlobUploadGrant(upload_id, pathname_prefix, grant, expires_at)
+
+
+def create_gallery_blob_upload_grant(
+    *,
+    fire_id: str,
+    zone_revision_id: str,
+    size_bytes: int,
+    actor: Actor,
+    settings: Settings,
+) -> BlobUploadGrant:
+    token = _read_write_token(settings)
+    if size_bytes <= 0 or size_bytes > INCIDENT_GALLERY_MAX_BYTES:
+        raise BadRequestError("map_capture_too_large", "The map capture exceeds the size limit.")
+    upload_id = uuid4().hex
+    pathname_prefix = build_object_store(settings).pathname_for(f"gallery-captures/{upload_id}")
+    now = utcnow()
+    expires_at = now + timedelta(minutes=settings.blob_upload_grant_minutes)
+    grant = jwt.encode(
+        {
+            "iss": BLOB_UPLOAD_GRANT_ISSUER,
+            "aud": BLOB_UPLOAD_GRANT_AUDIENCE,
+            "sub": actor.actor_id,
+            "iat": now,
+            "exp": expires_at,
+            "upload_id": upload_id,
+            "pathname_prefix": pathname_prefix,
+            "package_id": zone_revision_id,
+            "fire_id": fire_id,
+            "file_count": 1,
+            "total_size_bytes": size_bytes,
+            "purpose": "incident_gallery",
         },
         token,
         algorithm="HS256",
@@ -107,7 +225,7 @@ def _decode_upload_grant(grant: str, *, settings: Settings) -> dict[str, Any]:
     return claims
 
 
-def _safe_granted_path(pathname: str, *, prefix: str) -> None:
+def _safe_granted_path(pathname: str, *, prefix: str, allowed_suffixes: frozenset[str]) -> None:
     expected_prefix = f"{prefix}/"
     if not pathname.startswith(expected_prefix):
         raise ForbiddenError("The Blob pathname is outside the granted package prefix.")
@@ -117,7 +235,7 @@ def _safe_granted_path(pathname: str, *, prefix: str) -> None:
         or "\\" in relative
         or "\x00" in relative
         or any(part in {"", ".", ".."} for part in PurePosixPath(relative).parts)
-        or PurePosixPath(relative).suffix.casefold() not in _ALLOWED_SUFFIXES
+        or PurePosixPath(relative).suffix.casefold() not in allowed_suffixes
     ):
         raise BadRequestError("invalid_blob_pathname", "The Blob pathname is not allowed.")
 
@@ -143,7 +261,29 @@ def issue_blob_client_token(
         raise ForbiddenError("The Blob upload grant is incomplete.")
     if client_payload is not None and not hmac.compare_digest(client_payload, package_id):
         raise ForbiddenError("The Blob upload payload does not match the granted package.")
-    _safe_granted_path(pathname, prefix=prefix)
+    purpose = claims.get("purpose", "spatial_package")
+    allowed_suffixes: frozenset[str]
+    allowed_content_types: tuple[str, ...]
+    maximum_size: int
+    if purpose == "source_package":
+        allowed_suffixes = _ALLOWED_SOURCE_SUFFIXES
+        allowed_content_types = ALLOWED_SOURCE_CONTENT_TYPES
+        maximum_size = settings.agent_source_package_max_file_bytes
+    elif purpose == "public_contribution":
+        allowed_suffixes = _ALLOWED_PUBLIC_CONTRIBUTION_SUFFIXES
+        allowed_content_types = ("image/jpeg", "image/png", "image/webp")
+        maximum_size = settings.public_contribution_max_image_bytes
+    elif purpose == "spatial_package":
+        allowed_suffixes = _ALLOWED_SUFFIXES
+        allowed_content_types = ALLOWED_PACKAGE_CONTENT_TYPES
+        maximum_size = settings.zone_upload_max_bytes
+    elif purpose == "incident_gallery":
+        allowed_suffixes = _ALLOWED_GALLERY_SUFFIXES
+        allowed_content_types = ALLOWED_GALLERY_CONTENT_TYPES
+        maximum_size = INCIDENT_GALLERY_MAX_BYTES
+    else:
+        raise ForbiddenError("The Blob upload grant purpose is invalid.")
+    _safe_granted_path(pathname, prefix=prefix, allowed_suffixes=allowed_suffixes)
 
     read_write_token = _read_write_token(settings)
     grant_exp_ms = int(float(claims["exp"]) * 1_000)
@@ -152,8 +292,8 @@ def issue_blob_client_token(
     )
     payload = {
         "pathname": pathname,
-        "maximumSizeInBytes": settings.zone_upload_max_bytes,
-        "allowedContentTypes": list(ALLOWED_PACKAGE_CONTENT_TYPES),
+        "maximumSizeInBytes": maximum_size,
+        "allowedContentTypes": list(allowed_content_types),
         "validUntil": min(grant_exp_ms, requested_exp_ms),
         "addRandomSuffix": False,
         "allowOverwrite": False,

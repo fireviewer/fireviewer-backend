@@ -13,6 +13,7 @@ from fire_viewer.core.ids import new_prefixed_id
 from fire_viewer.core.security import Actor
 from fire_viewer.core.time import as_utc, ensure_utc, utcnow
 from fire_viewer.db.models import (
+    ActiveFireZoneRevision,
     AgentAnalysisWindow,
     AgentDispatch,
     AgentFactProposal,
@@ -40,6 +41,7 @@ from fire_viewer.domain.agent_schemas import (
     WorkerInputV2,
 )
 from fire_viewer.domain.enums import (
+    ActiveFireZoneReviewState,
     AgentAnalysisState,
     AgentBatchState,
     AgentConsentState,
@@ -675,6 +677,37 @@ def withdraw_agent_consent(
         spatial_proposal.reviewed_at = now
         spatial_proposal.review_reason = reason
 
+    invalidated_proposal_ids = {
+        f"proposal:{proposal.proposal_id}" for proposal in invalidated_proposals
+    }
+    invalidated_activity_zones: list[ActiveFireZoneRevision] = []
+    if batch.analysis_window_id is not None and invalidated_proposal_ids:
+        candidate_zones = list(
+            session.scalars(
+                select(ActiveFireZoneRevision).where(
+                    ActiveFireZoneRevision.analysis_window_id == batch.analysis_window_id,
+                    ActiveFireZoneRevision.geometry_origin == "AGENT_DERIVED",
+                    ActiveFireZoneRevision.review_state != ActiveFireZoneReviewState.REJECTED,
+                )
+            )
+        )
+        for zone in candidate_zones:
+            if invalidated_proposal_ids.intersection(zone.supporting_marker_ids):
+                zone.review_state = ActiveFireZoneReviewState.REJECTED
+                zone.reviewed_by = actor.actor_id
+                zone.reviewed_at = now
+                zone.review_reason = reason
+                invalidated_activity_zones.append(zone)
+        session.flush()
+        if invalidated_activity_zones and batch.dispatch is not None:
+            from fire_viewer.services.agent_intelligence import _refresh_daily_activity_zone
+
+            _refresh_daily_activity_zone(
+                session,
+                batch.dispatch,
+                worker_id="consent-withdrawal-recompute",
+            )
+
     fact_row_ids = [fact.id for fact in invalidated_facts]
     invalidated_reports: list[AgentSituationReportRevision] = []
     if fact_row_ids:
@@ -727,6 +760,7 @@ def withdraw_agent_consent(
             "invalidated_spatial_proposals": len(invalidated_proposals),
             "invalidated_fact_proposals": len(invalidated_facts),
             "invalidated_reports": len(invalidated_reports),
+            "invalidated_activity_zones": len(invalidated_activity_zones),
         },
     )
     session.commit()
