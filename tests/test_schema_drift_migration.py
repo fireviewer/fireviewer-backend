@@ -15,14 +15,13 @@ PRE_NORMALIZATION_REVISION = "f3b8c1d7a920"
 NORMALIZATION_REVISION = "a4e9c2f7d610"
 PRE_SOURCE_INGESTION_REVISION = "e1c7a9b4d620"
 SOURCE_INGESTION_REVISION = "f9c8b7a6d510"
-CURRENT_SCHEMA_REVISION = "db7c2e4f9a10"
+CURRENT_SCHEMA_REVISION = "e5b7c9d2a410"
 
 
 def test_runtime_and_vercel_expect_the_current_schema_revision() -> None:
     vercel_config = json.loads((PROJECT_ROOT / "vercel.json").read_text(encoding="utf-8"))
 
     assert Settings().database_schema_revision == CURRENT_SCHEMA_REVISION
-    assert "buildCommand" not in vercel_config
     assert vercel_config["env"]["FV_DATABASE_SCHEMA_REVISION"] == CURRENT_SCHEMA_REVISION
 
 

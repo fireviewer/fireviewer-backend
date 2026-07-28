@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "env": {
-    "FV_DATABASE_SCHEMA_REVISION": "db7c2e4f9a10"
+    "FV_DATABASE_SCHEMA_REVISION": "e5b7c9d2a410"
   },
   "functions": {
     "api/index.py": {

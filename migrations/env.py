@@ -2,7 +2,7 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import Connection, engine_from_config, pool
 
 from fire_viewer.db import models  # noqa: F401
 from fire_viewer.db.base import Base
@@ -75,6 +75,11 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    provided_connection = config.attributes.get("connection")
+    if isinstance(provided_connection, Connection):
+        _run_migrations_on_connection(provided_connection)
+        return
+
     configuration = dict(config.get_section(config.config_ini_section, {}))
     configuration["sqlalchemy.url"] = database_url()
     connectable = engine_from_config(
@@ -84,16 +89,20 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            compare_type=True,
-            render_as_batch=connection.dialect.name == "sqlite",
-            include_object=include_object,
-        )
+        _run_migrations_on_connection(connection)
 
-        with context.begin_transaction():
-            context.run_migrations()
+
+def _run_migrations_on_connection(connection: Connection) -> None:
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        render_as_batch=connection.dialect.name == "sqlite",
+        include_object=include_object,
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
 
 
 if context.is_offline_mode():

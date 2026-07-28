@@ -55,6 +55,9 @@ where = ["src"]
 [tool.setuptools.package-data]
 fire_viewer = ["py.typed", "data/proj/*.tif"]
 
+[tool.vercel.scripts]
+build = "python -m fire_viewer.scripts.migrate_vercel"
+
 [tool.pytest.ini_options]
 addopts = "--strict-markers --strict-config --cov=fire_viewer --cov-report=term-missing:skip-covered"
 pythonpath = ["src"]
