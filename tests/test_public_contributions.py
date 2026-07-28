@@ -250,10 +250,10 @@ def test_public_incident_evidence_uses_private_user_media_and_human_review(
     # scheduler has already created the dispatch.
     launched = client.post(
         "/api/v2/admin/agent-batches/incidents/FR-26-00001/operations/user_media/run",
-        json={"local_date": batch.analysis_window.local_date.isoformat()},
+        json={"expected_analysis_window_id": batch.analysis_window.analysis_id},
     )
-    assert launched.status_code == 409, launched.text
-    assert launched.json()["type"] == "urn:fire-viewer:error:agent_analysis_nothing_to_run"
+    assert launched.status_code == 200, launched.text
+    assert launched.json()["operation_ids"] == [batch.batch_id]
     dispatch = session.scalar(select(AgentDispatch))
     assert dispatch is not None
     dispatched_item = dispatch.payload["items"][0]

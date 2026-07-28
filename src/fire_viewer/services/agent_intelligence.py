@@ -53,7 +53,12 @@ def _refresh_daily_activity_zone(
             select(AgentSpatialProposal)
             .where(
                 AgentSpatialProposal.analysis_window_id == analysis_window.id,
-                AgentSpatialProposal.status == "ground_point",
+                AgentSpatialProposal.status.in_(["ground_point", "projected_geometry"]),
+                AgentSpatialProposal.proposal_kind.in_(
+                    ["legacy_ground_point", "active_fire_point", "smoke_origin_point"]
+                ),
+                AgentSpatialProposal.longitude.is_not(None),
+                AgentSpatialProposal.latitude.is_not(None),
                 AgentSpatialProposal.review_state.notin_(
                     [AgentProposalReviewState.REJECTED, AgentProposalReviewState.INVALIDATED]
                 ),
@@ -262,7 +267,10 @@ def persist_worker_output_v2(
     for result in output.items:
         source_item = items_by_input[result.input_id]
         for annotation in result.source_annotations:
-            source_x, source_y = annotation.source_point_normalized
+            source_x: float | None = None
+            source_y: float | None = None
+            if annotation.source_point_normalized is not None:
+                source_x, source_y = annotation.source_point_normalized
             stored = AgentSourceAnnotation(
                 annotation_id=annotation.annotation_id,
                 analysis_window_id=analysis_window.id,
@@ -272,6 +280,7 @@ def persist_worker_output_v2(
                 semantic_anchor=annotation.semantic_anchor,
                 source_x_normalized=source_x,
                 source_y_normalized=source_y,
+                source_geometry_normalized=annotation.source_geometry_normalized,
                 model_score=annotation.model_score,
             )
             session.add(stored)
@@ -286,6 +295,14 @@ def persist_worker_output_v2(
                 if proposal.annotation_id is not None
                 else None
             )
+            proposal_kind = proposal.proposal_kind
+            geometry_geojson = proposal.geometry_geojson
+            if proposal.status == "ground_point":
+                proposal_kind = "legacy_ground_point"
+                geometry_geojson = {
+                    "type": "Point",
+                    "coordinates": [proposal.longitude, proposal.latitude],
+                }
             session.add(
                 AgentSpatialProposal(
                     proposal_id=proposal.proposal_id,
@@ -293,11 +310,13 @@ def persist_worker_output_v2(
                     source_media_item_id=source_item.id,
                     source_annotation_id=(source_annotation.id if source_annotation else None),
                     status=proposal.status,
+                    proposal_kind=proposal_kind,
                     observed_at=proposal.observed_at,
                     geometry_origin=proposal.geometry_origin,
                     longitude=proposal.longitude,
                     latitude=proposal.latitude,
                     altitude_m=proposal.altitude_m,
+                    geometry_geojson=geometry_geojson,
                     horizontal_accuracy_m=proposal.horizontal_accuracy_m,
                     reference_bundle_sha256=proposal.reference_bundle_sha256,
                     uncertainty_codes=list(proposal.uncertainty_codes),

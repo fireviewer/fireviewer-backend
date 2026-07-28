@@ -39,6 +39,9 @@ from fire_viewer.domain.enums import (
     PublicContributionState,
 )
 from fire_viewer.domain.errors import ConflictError, NotFoundError
+from fire_viewer.services.agent_validation_campaigns import (
+    refresh_campaign_day_publication_state,
+)
 from fire_viewer.services.common import record_operator_audit
 from fire_viewer.services.public_contributions import _admin_status, _load_contribution
 
@@ -305,6 +308,11 @@ def review_contribution_proposal(
         report.review_reason = payload.reason
         after_state = report.review_state.value
         after_version = report.revision
+        if payload.action == "validate":
+            refresh_campaign_day_publication_state(
+                session,
+                analysis_window_id=report.analysis_window_id,
+            )
     else:
         raise NotFoundError("contribution_proposal", proposal_id)
     record_operator_audit(

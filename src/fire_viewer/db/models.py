@@ -43,6 +43,7 @@ from fire_viewer.domain.enums import (
     AgentSourceCandidateState,
     AgentSourcePackageState,
     AgentSourceResearchState,
+    AgentValidationCampaignDayState,
     AssetLod,
     AssetState,
     EvidenceSpatialMode,
@@ -1513,6 +1514,94 @@ class AgentAnalysisWindow(Base, TimestampMixin):
     )
 
 
+class AgentValidationCampaign(Base, TimestampMixin):
+    """Internal ordered campaign; it is intentionally absent from the HTTP API."""
+
+    __tablename__ = "agent_validation_campaign"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    campaign_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    days: Mapped[list[AgentValidationCampaignDay]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+        order_by="AgentValidationCampaignDay.ordinal",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("manifest_sha256", name="uq_agent_validation_campaign_manifest"),
+        CheckConstraint(
+            sha256_hex_check("manifest_sha256"),
+            name="ck_agent_validation_campaign_manifest_hash",
+        ),
+        CheckConstraint("version >= 1", name="ck_agent_validation_campaign_version"),
+        Index(
+            "uq_agent_validation_campaign_active",
+            "is_active",
+            unique=True,
+            sqlite_where=text("is_active = 1"),
+            postgresql_where=text("is_active"),
+        ),
+    )
+
+
+class AgentValidationCampaignDay(Base, TimestampMixin):
+    """One immutable manifest/window gate in an internal validation campaign."""
+
+    __tablename__ = "agent_validation_campaign_day"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    campaign_day_id: Mapped[str] = mapped_column(
+        String(128), nullable=False, unique=True, index=True
+    )
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_validation_campaign.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    analysis_window_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_analysis_window.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    cutoff_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    allowed_media_sha256: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    required_operations: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    declared_absences: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    state: Mapped[AgentValidationCampaignDayState] = mapped_column(
+        enum_column(
+            AgentValidationCampaignDayState,
+            name="agent_validation_campaign_day_state",
+        ),
+        nullable=False,
+        default=AgentValidationCampaignDayState.LOCKED,
+        index=True,
+    )
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    campaign: Mapped[AgentValidationCampaign] = relationship(back_populates="days")
+    analysis_window: Mapped[AgentAnalysisWindow] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "ordinal", name="uq_agent_validation_campaign_day_order"),
+        CheckConstraint("ordinal >= 1", name="ck_agent_validation_campaign_day_ordinal"),
+        CheckConstraint(
+            sha256_hex_check("manifest_sha256"),
+            name="ck_agent_validation_campaign_day_manifest_hash",
+        ),
+        CheckConstraint("version >= 1", name="ck_agent_validation_campaign_day_version"),
+    )
+
+
 class AgentSourcePackage(Base, TimestampMixin):
     """Private user-provided sources before they become normal media batches."""
 
@@ -1994,8 +2083,9 @@ class AgentSourceAnnotation(Base, TimestampMixin):
     evidence_id: Mapped[str] = mapped_column(String(128), nullable=False)
     evidence_kind: Mapped[str] = mapped_column(String(32), nullable=False)
     semantic_anchor: Mapped[str] = mapped_column(String(64), nullable=False)
-    source_x_normalized: Mapped[float] = mapped_column(Float, nullable=False)
-    source_y_normalized: Mapped[float] = mapped_column(Float, nullable=False)
+    source_x_normalized: Mapped[float | None] = mapped_column(Float)
+    source_y_normalized: Mapped[float | None] = mapped_column(Float)
+    source_geometry_normalized: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     model_score: Mapped[float | None] = mapped_column(Float)
 
     analysis_window: Mapped[AgentAnalysisWindow] = relationship(back_populates="source_annotations")
@@ -2011,16 +2101,24 @@ class AgentSourceAnnotation(Base, TimestampMixin):
         ),
         CheckConstraint(
             "semantic_anchor IN ('active_fire_point', 'visible_fire_front_point', "
-            "'smoke_column_base')",
+            "'visible_fire_front', 'smoke_column_base', 'smoke_origin_point', "
+            "'burned_area_polygon')",
             name="ck_agent_annotation_semantic_anchor",
         ),
         CheckConstraint(
-            "source_x_normalized >= 0 AND source_x_normalized <= 1",
+            "source_x_normalized IS NULL OR "
+            "(source_x_normalized >= 0 AND source_x_normalized <= 1)",
             name="ck_agent_annotation_x",
         ),
         CheckConstraint(
-            "source_y_normalized >= 0 AND source_y_normalized <= 1",
+            "source_y_normalized IS NULL OR "
+            "(source_y_normalized >= 0 AND source_y_normalized <= 1)",
             name="ck_agent_annotation_y",
+        ),
+        CheckConstraint(
+            "(source_x_normalized IS NULL AND source_y_normalized IS NULL) OR "
+            "(source_x_normalized IS NOT NULL AND source_y_normalized IS NOT NULL)",
+            name="ck_agent_annotation_point_shape",
         ),
         CheckConstraint(
             "model_score IS NULL OR (model_score >= 0 AND model_score <= 1)",
@@ -2046,11 +2144,13 @@ class AgentSpatialProposal(Base, TimestampMixin):
         ForeignKey("agent_source_annotation.id", ondelete="RESTRICT"), index=True
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    proposal_kind: Mapped[str | None] = mapped_column(String(64), index=True)
     observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     geometry_origin: Mapped[str | None] = mapped_column(String(64))
     longitude: Mapped[float | None] = mapped_column(Float)
     latitude: Mapped[float | None] = mapped_column(Float)
     altitude_m: Mapped[float | None] = mapped_column(Float)
+    geometry_geojson: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
     horizontal_accuracy_m: Mapped[float | None] = mapped_column(Float)
     reference_bundle_sha256: Mapped[str | None] = mapped_column(String(64))
     uncertainty_codes: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
@@ -2074,8 +2174,14 @@ class AgentSpatialProposal(Base, TimestampMixin):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('ground_point', 'insufficient_geometry')",
+            "status IN ('ground_point', 'projected_geometry', 'insufficient_geometry')",
             name="ck_agent_spatial_proposal_status",
+        ),
+        CheckConstraint(
+            "proposal_kind IS NULL OR proposal_kind IN "
+            "('active_fire_point', 'smoke_origin_point', 'visible_fire_front', "
+            "'probable_activity_envelope', 'burned_area_polygon', 'legacy_ground_point')",
+            name="ck_agent_spatial_proposal_kind",
         ),
         CheckConstraint(
             "geometry_origin IS NULL OR geometry_origin IN "
@@ -2103,9 +2209,17 @@ class AgentSpatialProposal(Base, TimestampMixin):
         ),
         CheckConstraint(
             "(status = 'ground_point' AND source_annotation_id IS NOT NULL "
+            "AND proposal_kind = 'legacy_ground_point' AND geometry_geojson IS NOT NULL "
             "AND geometry_origin IS NOT NULL AND longitude IS NOT NULL AND latitude IS NOT NULL "
             "AND horizontal_accuracy_m IS NOT NULL AND reference_bundle_sha256 IS NOT NULL) OR "
+            "(status = 'projected_geometry' AND proposal_kind IS NOT NULL "
+            "AND proposal_kind != 'legacy_ground_point' AND geometry_geojson IS NOT NULL "
+            "AND observed_at IS NOT NULL AND geometry_origin IS NOT NULL "
+            "AND horizontal_accuracy_m IS NOT NULL AND reference_bundle_sha256 IS NOT NULL "
+            "AND (geometry_origin = 'EXPLICIT_SOURCE_GEOMETRY' "
+            "OR source_annotation_id IS NOT NULL)) OR "
             "(status = 'insufficient_geometry' AND geometry_origin IS NULL "
+            "AND proposal_kind IS NULL AND geometry_geojson IS NULL "
             "AND longitude IS NULL AND latitude IS NULL AND altitude_m IS NULL "
             "AND horizontal_accuracy_m IS NULL)",
             name="ck_agent_spatial_proposal_geometry_shape",

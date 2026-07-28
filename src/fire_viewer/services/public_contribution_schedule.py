@@ -23,9 +23,18 @@ from fire_viewer.db.models import (
     AgentSourcePackageItem,
     PublicContributionSubmission,
 )
-from fire_viewer.domain.enums import AgentBatchState, PublicContributionState
+from fire_viewer.domain.enums import (
+    AgentBatchState,
+    AgentValidationCampaignDayState,
+    PublicContributionState,
+)
 from fire_viewer.domain.errors import ConflictError
 from fire_viewer.services.agent_batches import enqueue_agent_batch
+from fire_viewer.services.agent_validation_campaigns import (
+    ActiveAnalysisWindow,
+    active_campaign,
+    batch_is_allowed_for_active_campaign,
+)
 
 _SCHEDULE_KEY = "public-contribution-intake-v1"
 
@@ -99,8 +108,34 @@ def run_public_contribution_schedule_once(
         .all()
     )
     actor = Actor(actor_id="agent-scheduler:public-contributions", roles=frozenset())
+    campaign = active_campaign(session)
+    campaign_window: ActiveAnalysisWindow | None = None
+    if campaign is not None:
+        active_days = [
+            day
+            for day in campaign.days
+            if day.state
+            in {
+                AgentValidationCampaignDayState.READY,
+                AgentValidationCampaignDayState.RUNNING,
+            }
+        ]
+        if len(active_days) != 1:
+            raise ConflictError(
+                "agent_campaign_active_window_invalid",
+                "The internal campaign must expose exactly one runnable analysis window.",
+            )
+        campaign_window = ActiveAnalysisWindow(
+            window=active_days[0].analysis_window,
+            campaign_day=active_days[0],
+        )
     queued = 0
     for batch in batches:
+        if campaign_window is not None and (
+            batch.analysis_window_id != campaign_window.window.id
+            or not batch_is_allowed_for_active_campaign(batch, campaign_window)
+        ):
+            continue
         try:
             outcome = enqueue_agent_batch(
                 session,

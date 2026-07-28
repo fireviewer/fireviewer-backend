@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Query, Request, Response, status
+from fastapi import APIRouter, Path, Request, Response, status
 
 from fire_viewer.api.dependencies import (
     ActorDep,
@@ -215,16 +215,13 @@ def read_incident_operations(
     actor: ActorDep,
     session: SessionDep,
     settings: SettingsDep,
-    local_date: Annotated[str, Query(pattern=r"^\d{4}-\d{2}-\d{2}$")],
 ) -> AgentOperationsOverview:
     _require_agent_operator(actor)
     _private(response)
-    from datetime import date
 
     return get_agent_operations(
         session,
         fire_id=fire_id,
-        local_date=date.fromisoformat(local_date),
         settings=settings,
     )
 

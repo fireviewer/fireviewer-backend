@@ -244,6 +244,14 @@ def create_source_research(
             "cutoff_at": as_utc(window.window_end_at).isoformat(),
         },
     )
+    from fire_viewer.services.agent_validation_campaigns import (
+        refresh_campaign_day_review_state,
+    )
+
+    refresh_campaign_day_review_state(
+        session,
+        analysis_window_id=run.analysis_window_id,
+    )
     session.commit()
     return _response(_load_run(session, research_id))
 

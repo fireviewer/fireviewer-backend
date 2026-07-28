@@ -25,6 +25,7 @@ from fire_viewer.domain.enums import (
     AgentReportReviewState,
 )
 from fire_viewer.services.agent_dispatcher import run_dispatcher_once
+from fire_viewer.services.agent_traceability import get_spatial_proposal_trace
 
 
 class FakeRunPodV2:
@@ -307,13 +308,38 @@ def test_v2_result_stays_private_and_persists_grounding_abstention_and_report(
     proposals = list(
         session.scalars(select(AgentSpatialProposal).order_by(AgentSpatialProposal.proposal_id))
     )
-    assert completed is not None and completed.state == AgentDispatchState.SUCCEEDED
+    assert completed is not None and completed.state == AgentDispatchState.SUCCEEDED, (
+        completed.last_error_detail if completed is not None else "missing dispatch"
+    )
     assert analysis is not None and analysis.state == AgentAnalysisState.REVIEW_PENDING
     assert session.scalar(select(func.count()).select_from(AgentSourceAnnotation)) == 1
     assert [proposal.status for proposal in proposals] == [
         "insufficient_geometry",
         "ground_point",
     ]
+    grounded = next(proposal for proposal in proposals if proposal.status == "ground_point")
+    assert grounded.proposal_kind == "legacy_ground_point"
+    assert grounded.geometry_geojson == {
+        "type": "Point",
+        "coordinates": [5.369, 44.751],
+    }
+    annotation = session.scalar(select(AgentSourceAnnotation))
+    assert annotation is not None
+    assert annotation.source_geometry_normalized == {
+        "type": "Point",
+        "coordinates": [0.43, 0.57],
+    }
+    trace = get_spatial_proposal_trace(
+        session,
+        proposal_id="spatial-fire-0001",
+    )
+    assert trace is not None
+    assert trace.analysis_window.analysis_id == "analysis-die-2026-07-09"
+    assert trace.source.input_id == "media-die-0001"
+    assert trace.source.source_reference_url == "https://example.test/die/source"
+    assert trace.annotation is not None
+    assert trace.annotation.annotation_id == "annotation-fire-0001"
+    assert trace.proposal_kind == "legacy_ground_point"
     assert all(proposal.review_state == AgentProposalReviewState.PENDING for proposal in proposals)
     assert session.scalar(select(func.count()).select_from(AgentFactProposal)) == 1
     zone = session.scalar(select(ActiveFireZoneRevision))

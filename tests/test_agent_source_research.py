@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 
 from pydantic import SecretStr
 from sqlalchemy import func, select
 
 from fire_viewer.db.models import (
+    AgentAnalysisWindow,
     AgentDispatch,
     AgentMediaBatch,
     AgentMediaItem,
@@ -21,10 +23,23 @@ from fire_viewer.domain.enums import (
     AgentSourceResearchState,
 )
 from fire_viewer.services.agent_dispatcher import run_dispatcher_once
+from fire_viewer.services.agent_validation_campaigns import create_campaign_from_manifest
 from fire_viewer.services.blob_uploads import BlobUploadGrant
 from test_agent_source_packages import _prepare_upload
 
 PINNED_RESEARCH_REVISION = "e7974da369bd887ad4f10a072ec4f933ac5391bf"
+
+
+def _canonical_sha256(payload: dict[str, object], excluded_key: str) -> str:
+    normalized = {key: value for key, value in payload.items() if key != excluded_key}
+    return hashlib.sha256(
+        json.dumps(
+            normalized,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
 
 
 class _ResearchRunPod:
@@ -141,6 +156,7 @@ def test_research_uses_real_contract_cutoff_dedup_and_shared_dispatcher(
     settings,
     seed_incident,
     monkeypatch,
+    tmp_path,
 ) -> None:
     seed_incident(fire_id="FR-26-00001", sequence=1, lon=5.37, lat=44.75)
     store, total_size = _prepare_upload(monkeypatch, settings, count=1)
@@ -170,10 +186,42 @@ def test_research_uses_real_contract_cutoff_dedup_and_shared_dispatcher(
         f"/api/v2/admin/agent-batches/source-packages/{opened.json()['package_id']}/finalize"
     )
     assert finalized.status_code == 200, finalized.text
+    window = session.scalar(
+        select(AgentAnalysisWindow).where(
+            AgentAnalysisWindow.local_date == datetime(2026, 7, 9).date()
+        )
+    )
+    media = session.scalar(select(AgentMediaItem))
+    assert window is not None and media is not None and media.media_sha256 is not None
+    cutoff_at = window.window_end_at
+    if cutoff_at.tzinfo is None:
+        cutoff_at = cutoff_at.replace(tzinfo=UTC)
+    day: dict[str, object] = {
+        "ordinal": 1,
+        "fire_id": "FR-26-00001",
+        "local_date": "2026-07-09",
+        "cutoff_at": cutoff_at.isoformat(),
+        "allowed_media_sha256": [media.media_sha256],
+        "required_operations": ["user_media", "source_research"],
+        "declared_absences": ["satellite_media"],
+    }
+    day["manifest_sha256"] = _canonical_sha256(day, "manifest_sha256")
+    campaign: dict[str, object] = {
+        "schema_version": "2.0",
+        "campaign_id": "test-source-research-campaign",
+        "days": [day],
+    }
+    campaign["manifest_sha256"] = _canonical_sha256(campaign, "manifest_sha256")
+    manifest_path = tmp_path / "campaign.json"
+    manifest_path.write_text(json.dumps(campaign), encoding="utf-8")
+    create_campaign_from_manifest(
+        session,
+        manifest_path=manifest_path,
+        created_by="test-suite",
+    )
 
     operations = client.get(
         "/api/v2/admin/agent-batches/incidents/FR-26-00001/operations",
-        params={"local_date": "2026-07-09"},
     )
     assert operations.status_code == 200, operations.text
     research_action = next(
@@ -184,7 +232,7 @@ def test_research_uses_real_contract_cutoff_dedup_and_shared_dispatcher(
     assert research_action["can_run"] is True
     research = client.post(
         "/api/v2/admin/agent-batches/incidents/FR-26-00001/operations/source_research/run",
-        json={"local_date": "2026-07-09", "location_hint": "Die, massif de Justin"},
+        json={"expected_analysis_window_id": window.analysis_id},
     )
     assert research.status_code == 200, research.text
     research_id = research.json()["operation_ids"][0]

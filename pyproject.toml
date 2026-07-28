@@ -46,6 +46,7 @@ fire-viewer-check-migrations = "fire_viewer.scripts.check_migrations:main"
 fire-viewer-hash-admin-password = "fire_viewer.scripts.hash_admin_password:main"
 fire-viewer-agent-dispatcher = "fire_viewer.scripts.run_agent_dispatcher:main"
 fire-viewer-compare-activity-zone = "fire_viewer.scripts.compare_activity_zone:main"
+fire-viewer-create-validation-campaign = "fire_viewer.scripts.create_validation_campaign:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

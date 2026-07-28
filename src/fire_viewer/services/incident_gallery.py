@@ -27,6 +27,9 @@ from fire_viewer.domain.incident_spatial_schemas import (
     IncidentMapCaptureFinalizeRequest,
     IncidentMapCaptureUploadGrantRequest,
 )
+from fire_viewer.services.agent_validation_campaigns import (
+    refresh_campaign_day_publication_state,
+)
 from fire_viewer.services.blob_uploads import (
     ALLOWED_GALLERY_CONTENT_TYPES,
     INCIDENT_GALLERY_MAX_BYTES,
@@ -224,5 +227,10 @@ def finalize_map_capture(
             "sha256": capture.sha256,
         },
     )
+    if zone.analysis_window_id is not None:
+        refresh_campaign_day_publication_state(
+            session,
+            analysis_window_id=zone.analysis_window_id,
+        )
     session.commit()
     return map_capture_response(capture, fire_id)

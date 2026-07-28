@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from fire_viewer.domain.agent_schemas import (
     AgentBatchCreateRequestV2,
     ReportSectionV2,
+    SourceAnnotationV2,
     SpatialProposalV2,
     WorkerInputV2,
     WorkerOutputV2,
@@ -99,6 +100,93 @@ def test_ground_point_requires_deterministic_geometry_provenance() -> None:
                 "status": "ground_point",
                 "longitude": 5.382,
                 "latitude": 44.759,
+            }
+        )
+
+
+def test_legacy_ground_point_is_materialized_as_traceable_geojson() -> None:
+    proposal = SpatialProposalV2.model_validate(
+        {
+            "proposal_id": "SP-LEGACY",
+            "annotation_id": "ANN-1",
+            "status": "ground_point",
+            "geometry_origin": "CAMERA_RAYCAST",
+            "longitude": 5.382,
+            "latitude": 44.759,
+            "horizontal_accuracy_m": 80,
+            "reference_bundle_sha256": "a" * 64,
+        }
+    )
+
+    assert proposal.proposal_kind == "legacy_ground_point"
+    assert proposal.geometry_geojson == {
+        "type": "Point",
+        "coordinates": [5.382, 44.759],
+    }
+
+
+def test_visible_front_accepts_line_geometry_without_a_fake_source_point() -> None:
+    annotation = SourceAnnotationV2.model_validate(
+        {
+            "annotation_id": "ANN-FRONT",
+            "evidence_id": "IMAGE-1",
+            "evidence_kind": "image",
+            "semantic_anchor": "visible_fire_front",
+            "source_geometry_normalized": {
+                "type": "LineString",
+                "coordinates": [[0.2, 0.7], [0.5, 0.6], [0.8, 0.65]],
+            },
+        }
+    )
+
+    assert annotation.source_point_normalized is None
+
+
+def test_projected_front_requires_a_line_and_preserves_its_kind() -> None:
+    proposal = SpatialProposalV2.model_validate(
+        {
+            "proposal_id": "SP-FRONT",
+            "annotation_id": "ANN-FRONT",
+            "status": "projected_geometry",
+            "proposal_kind": "visible_fire_front",
+            "observed_at": "2026-07-12T15:00:00+02:00",
+            "geometry_origin": "CROSS_VIEW_RAYCAST",
+            "geometry_geojson": {
+                "type": "LineString",
+                "coordinates": [[2.65, 48.39], [2.66, 48.395]],
+            },
+            "horizontal_accuracy_m": 120,
+            "reference_bundle_sha256": "b" * 64,
+        }
+    )
+
+    assert proposal.proposal_kind == "visible_fire_front"
+    assert proposal.longitude is None
+
+
+def test_projected_front_rejects_a_polygon_disguised_as_a_line() -> None:
+    with pytest.raises(ValidationError, match="geometry type"):
+        SpatialProposalV2.model_validate(
+            {
+                "proposal_id": "SP-WRONG-SHAPE",
+                "annotation_id": "ANN-FRONT",
+                "status": "projected_geometry",
+                "proposal_kind": "visible_fire_front",
+                "observed_at": "2026-07-12T15:00:00+02:00",
+                "geometry_origin": "CROSS_VIEW_RAYCAST",
+                "geometry_geojson": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [2.65, 48.39],
+                            [2.66, 48.39],
+                            [2.66, 48.40],
+                            [2.65, 48.39],
+                        ]
+                    ],
+                },
+                "horizontal_accuracy_m": 120,
+                "reference_bundle_sha256": "b" * 64,
             }
         )
 

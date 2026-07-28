@@ -62,6 +62,9 @@ from fire_viewer.domain.spatial import (
     gltf_to_enu,
     wgs84_to_enu,
 )
+from fire_viewer.services.agent_validation_campaigns import (
+    refresh_campaign_day_publication_state,
+)
 from fire_viewer.services.common import record_operator_audit
 from fire_viewer.services.incident_gallery import map_capture_response
 
@@ -865,6 +868,11 @@ def review_zone_revision(
         trace_id=trace_id,
         after={"review_state": revision.review_state.value},
     )
+    if revision.analysis_window_id is not None:
+        refresh_campaign_day_publication_state(
+            session,
+            analysis_window_id=revision.analysis_window_id,
+        )
     session.commit()
     _, origin = _scene(session, incident, episode)
     return _zone_response(revision, origin=origin, revisions_by_id={revision.id: revision})

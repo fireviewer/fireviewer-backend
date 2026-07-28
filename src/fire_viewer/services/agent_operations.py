@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import date
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -34,6 +32,13 @@ from fire_viewer.domain.enums import (
 from fire_viewer.domain.errors import ConflictError, NotFoundError
 from fire_viewer.services.agent_batches import enqueue_agent_batch
 from fire_viewer.services.agent_source_research import create_source_research
+from fire_viewer.services.agent_validation_campaigns import (
+    ActiveAnalysisWindow,
+    batch_is_allowed_for_active_campaign,
+    mark_running,
+    require_expected_window,
+    resolve_active_analysis_window,
+)
 
 _ACTION_ORDER = (
     "user_media",
@@ -71,7 +76,7 @@ def _batches_for_episode(
     *,
     incident_id: int,
     episode_id: int,
-    local_date: date,
+    analysis_window_id: int,
 ) -> list[AgentMediaBatch]:
     return list(
         session.execute(
@@ -79,7 +84,7 @@ def _batches_for_episode(
             .where(
                 AgentMediaBatch.incident_id == incident_id,
                 AgentMediaBatch.episode_id == episode_id,
-                AgentMediaBatch.analysis_window.has(local_date=local_date),
+                AgentMediaBatch.analysis_window_id == analysis_window_id,
             )
             .options(
                 selectinload(AgentMediaBatch.items).selectinload(AgentMediaItem.consent),
@@ -96,7 +101,7 @@ def _research_for_episode(
     *,
     incident_id: int,
     episode_id: int,
-    local_date: date,
+    analysis_window_id: int,
 ) -> list[AgentSourceResearchRun]:
     return list(
         session.scalars(
@@ -104,7 +109,7 @@ def _research_for_episode(
             .where(
                 AgentSourceResearchRun.incident_id == incident_id,
                 AgentSourceResearchRun.episode_id == episode_id,
-                AgentSourceResearchRun.analysis_window.has(local_date=local_date),
+                AgentSourceResearchRun.analysis_window_id == analysis_window_id,
             )
             .order_by(
                 AgentSourceResearchRun.queued_at.asc(),
@@ -136,12 +141,17 @@ def _overview(
     *,
     incident: IncidentSeries,
     episode: Episode,
-    local_date: date,
+    active_window: ActiveAnalysisWindow,
     batches: list[AgentMediaBatch],
     research_runs: list[AgentSourceResearchRun],
     settings: Settings,
 ) -> AgentOperationsOverview:
     actions: list[AgentOperationStatus] = []
+    required_operations = (
+        set(active_window.campaign_day.required_operations)
+        if active_window.campaign_day is not None
+        else set(_ACTION_ORDER)
+    )
     for operation_type in _ACTION_ORDER:
         if operation_type == "source_research":
             active_runs = [
@@ -158,6 +168,8 @@ def _overview(
             blocked_reason = None
             if not settings.agent_dispatch_enabled:
                 blocked_reason = "dispatch_disabled"
+            elif operation_type not in required_operations:
+                blocked_reason = "nothing_to_process"
             elif not settings.agent_research_enabled:
                 blocked_reason = "research_disabled"
             elif active_runs:
@@ -186,6 +198,10 @@ def _overview(
         blocked_reason = None
         if not settings.agent_dispatch_enabled:
             blocked_reason = "dispatch_disabled"
+        elif operation_type not in required_operations:
+            blocked_reason = "nothing_to_process"
+        elif any(batch.state in _ACTIVE_STATES for batch in matching):
+            blocked_reason = "already_running"
         elif not pending:
             blocked_reason = "nothing_to_process"
         actions.append(
@@ -202,7 +218,11 @@ def _overview(
     return AgentOperationsOverview(
         fire_id=incident.fire_id,
         episode_id=episode.episode_id,
-        local_date=local_date,
+        analysis_window_id=active_window.window.analysis_id,
+        local_date=active_window.window.local_date,
+        campaign_day_state=(
+            active_window.campaign_day.state.value if active_window.campaign_day else None
+        ),
         actions=actions,
     )
 
@@ -211,25 +231,30 @@ def get_agent_operations(
     session: Session,
     *,
     fire_id: str,
-    local_date: date,
     settings: Settings,
 ) -> AgentOperationsOverview:
     incident, episode = _incident_episode(session, fire_id)
-    return _overview(
-        incident=incident,
-        episode=episode,
-        local_date=local_date,
-        batches=_batches_for_episode(
+    active = resolve_active_analysis_window(session, incident=incident, episode=episode)
+    batches = [
+        batch
+        for batch in _batches_for_episode(
             session,
             incident_id=incident.id,
             episode_id=episode.id,
-            local_date=local_date,
-        ),
+            analysis_window_id=active.window.id,
+        )
+        if batch_is_allowed_for_active_campaign(batch, active)
+    ]
+    return _overview(
+        incident=incident,
+        episode=episode,
+        active_window=active,
+        batches=batches,
         research_runs=_research_for_episode(
             session,
             incident_id=incident.id,
             episode_id=episode.id,
-            local_date=local_date,
+            analysis_window_id=active.window.id,
         ),
         settings=settings,
     )
@@ -251,37 +276,82 @@ def run_agent_operation(
             "The private inference dispatcher is not enabled.",
         )
     incident, episode = _incident_episode(session, fire_id)
+    active = resolve_active_analysis_window(session, incident=incident, episode=episode)
+    require_expected_window(
+        active,
+        expected_analysis_window_id=payload.expected_analysis_window_id,
+    )
     if operation_type == "source_research":
+        active_research = [
+            run
+            for run in _research_for_episode(
+                session,
+                incident_id=incident.id,
+                episode_id=episode.id,
+                analysis_window_id=active.window.id,
+            )
+            if run.state
+            in {
+                AgentSourceResearchState.QUEUED,
+                AgentSourceResearchState.SUBMITTING,
+                AgentSourceResearchState.RUNNING,
+                AgentSourceResearchState.CANCEL_REQUESTED,
+            }
+        ]
+        if active_research:
+            return AgentOperationRunResponse(
+                fire_id=incident.fire_id,
+                episode_id=episode.episode_id,
+                analysis_window_id=active.window.analysis_id,
+                operation_type=operation_type,
+                operation_ids=[run.research_id for run in active_research],
+                queued_files=0,
+            )
         research = create_source_research(
             session,
             fire_id=fire_id,
             payload=AgentSourceResearchRequest(
-                local_date=payload.local_date,
-                location_hint=payload.location_hint,
+                local_date=active.window.local_date,
+                location_hint=incident.canonical_name or fire_id,
             ),
             actor=actor,
             trace_id=trace_id,
             settings=settings,
         )
+        mark_running(session, active)
+        session.commit()
         return AgentOperationRunResponse(
             fire_id=incident.fire_id,
             episode_id=episode.episode_id,
+            analysis_window_id=active.window.analysis_id,
             operation_type=operation_type,
             operation_ids=[research.research_id],
             queued_files=0,
         )
     batch_type = AgentBatchType(operation_type)
-    candidates = [
+    matching = [
         batch
         for batch in _batches_for_episode(
             session,
             incident_id=incident.id,
             episode_id=episode.id,
-            local_date=payload.local_date,
+            analysis_window_id=active.window.id,
         )
-        if batch.batch_type == batch_type and _is_processable(batch)
+        if batch.batch_type == batch_type
+        and batch_is_allowed_for_active_campaign(batch, active)
     ]
+    candidates = [batch for batch in matching if _is_processable(batch)]
     if not candidates:
+        already_running = [batch for batch in matching if batch.state in _ACTIVE_STATES]
+        if already_running:
+            return AgentOperationRunResponse(
+                fire_id=incident.fire_id,
+                episode_id=episode.episode_id,
+                analysis_window_id=active.window.analysis_id,
+                operation_type=operation_type,
+                operation_ids=[batch.batch_id for batch in already_running],
+                queued_files=sum(len(batch.items) for batch in already_running),
+            )
         raise ConflictError(
             "agent_analysis_nothing_to_run",
             "No processable private batch is waiting for this analysis.",
@@ -298,9 +368,12 @@ def run_agent_operation(
         )
         queued_batch_ids.append(outcome.batch.batch_id)
         queued_files += len(outcome.batch.items)
+    mark_running(session, active)
+    session.commit()
     return AgentOperationRunResponse(
         fire_id=incident.fire_id,
         episode_id=episode.episode_id,
+        analysis_window_id=active.window.analysis_id,
         operation_type=operation_type,
         operation_ids=queued_batch_ids,
         queued_files=queued_files,

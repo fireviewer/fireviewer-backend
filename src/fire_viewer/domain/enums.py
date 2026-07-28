@@ -233,6 +233,15 @@ class AgentAnalysisState(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class AgentValidationCampaignDayState(StrEnum):
+    LOCKED = "locked"
+    READY = "ready"
+    RUNNING = "running"
+    REVIEW = "review"
+    PUBLISHED = "published"
+    FAILED = "failed"
+
+
 class AgentSourcePackageState(StrEnum):
     OPEN = "OPEN"
     FINALIZING = "FINALIZING"

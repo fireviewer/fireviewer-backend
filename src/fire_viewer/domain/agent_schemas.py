@@ -20,6 +20,7 @@ from fire_viewer.domain.enums import (
     AgentSourcePackageState,
     AgentSourceResearchState,
 )
+from fire_viewer.domain.geometry_contract import validate_geojson_geometry
 
 
 class StrictAgentModel(BaseModel):
@@ -239,18 +240,22 @@ class AgentOperationStatus(StrictAgentModel):
 class AgentOperationsOverview(StrictAgentModel):
     fire_id: str = Field(pattern=r"^FR-[0-9A-Z]{2,3}-[0-9]{5}$")
     episode_id: SafeIdentifier
+    analysis_window_id: SafeIdentifier
     local_date: date
+    campaign_day_state: (
+        Literal["locked", "ready", "running", "review", "published", "failed"] | None
+    )
     actions: list[AgentOperationStatus]
 
 
 class AgentOperationRunRequest(StrictAgentModel):
-    local_date: date
-    location_hint: str | None = Field(default=None, min_length=2, max_length=500)
+    expected_analysis_window_id: SafeIdentifier
 
 
 class AgentOperationRunResponse(StrictAgentModel):
     fire_id: str = Field(pattern=r"^FR-[0-9A-Z]{2,3}-[0-9]{5}$")
     episode_id: SafeIdentifier
+    analysis_window_id: SafeIdentifier
     operation_type: AgentOperationType
     operation_ids: list[SafeIdentifier]
     queued_files: int = Field(ge=0)
@@ -912,25 +917,85 @@ class WorkerInputV2(StrictAgentModel):
         return self
 
 
+SourceSemanticAnchorV2 = Literal[
+    "active_fire_point",
+    "visible_fire_front_point",
+    "visible_fire_front",
+    "smoke_column_base",
+    "smoke_origin_point",
+    "burned_area_polygon",
+]
+SpatialProposalKindV2 = Literal[
+    "active_fire_point",
+    "smoke_origin_point",
+    "visible_fire_front",
+    "probable_activity_envelope",
+    "burned_area_polygon",
+    "legacy_ground_point",
+]
+
+
 class SourceAnnotationV2(StrictAgentModel):
     annotation_id: SafeIdentifier
     evidence_id: SafeIdentifier
     evidence_kind: Literal["image", "frame", "satellite_image"]
-    semantic_anchor: Literal["active_fire_point", "visible_fire_front_point", "smoke_column_base"]
-    source_point_normalized: tuple[float, float]
+    semantic_anchor: SourceSemanticAnchorV2
+    source_point_normalized: tuple[float, float] | None = None
+    source_geometry_normalized: dict[str, object] | None = None
     model_score: float | None = Field(default=None, ge=0, le=1)
 
     @model_validator(mode="after")
-    def validate_point(self) -> SourceAnnotationV2:
-        if not all(0 <= coordinate <= 1 for coordinate in self.source_point_normalized):
-            raise ValueError("source annotation coordinates must be normalized")
+    def validate_source_geometry(self) -> SourceAnnotationV2:
+        point_semantics = {
+            "active_fire_point",
+            "visible_fire_front_point",
+            "smoke_column_base",
+            "smoke_origin_point",
+        }
+        allowed_types = (
+            {"Point"}
+            if self.semantic_anchor in point_semantics
+            else (
+                {"LineString", "MultiLineString"}
+                if self.semantic_anchor == "visible_fire_front"
+                else {"Polygon", "MultiPolygon"}
+            )
+        )
+        geometry = self.source_geometry_normalized
+        if geometry is None:
+            if self.source_point_normalized is None:
+                raise ValueError("source annotation requires normalized source geometry")
+            geometry = {
+                "type": "Point",
+                "coordinates": list(self.source_point_normalized),
+            }
+            self.source_geometry_normalized = geometry
+        validated = validate_geojson_geometry(
+            geometry,
+            allowed_types=allowed_types,
+            normalized=True,
+        )
+        if self.source_point_normalized is not None:
+            if validated["type"] != "Point":
+                raise ValueError("source_point_normalized is only compatible with Point geometry")
+            coordinates = validated["coordinates"]
+            assert isinstance(coordinates, list | tuple)
+            if tuple(float(value) for value in coordinates[:2]) != self.source_point_normalized:
+                raise ValueError(
+                    "source point and source geometry must reference the same position"
+                )
+        elif validated["type"] == "Point":
+            coordinates = validated["coordinates"]
+            assert isinstance(coordinates, list | tuple)
+            self.source_point_normalized = (float(coordinates[0]), float(coordinates[1]))
         return self
 
 
 class SpatialProposalV2(StrictAgentModel):
     proposal_id: SafeIdentifier
     annotation_id: SafeIdentifier | None = None
-    status: Literal["ground_point", "insufficient_geometry"]
+    status: Literal["ground_point", "projected_geometry", "insufficient_geometry"]
+    proposal_kind: SpatialProposalKindV2 | None = None
     observed_at: datetime | None = None
     geometry_origin: (
         Literal[
@@ -944,6 +1009,7 @@ class SpatialProposalV2(StrictAgentModel):
     longitude: float | None = Field(default=None, ge=-180, le=180)
     latitude: float | None = Field(default=None, ge=-90, le=90)
     altitude_m: float | None = Field(default=None, allow_inf_nan=False)
+    geometry_geojson: dict[str, object] | None = None
     horizontal_accuracy_m: float | None = Field(default=None, gt=0, le=100_000)
     reference_bundle_sha256: Sha256Hex | None = None
     uncertainty_codes: list[SafeIdentifier] = Field(default_factory=list, max_length=12)
@@ -952,24 +1018,77 @@ class SpatialProposalV2(StrictAgentModel):
     def validate_projection(self) -> SpatialProposalV2:
         if self.observed_at is not None and not _is_timezone_aware(self.observed_at):
             raise ValueError("spatial observation time must include a timezone")
-        projected = (
-            self.geometry_origin,
-            self.longitude,
-            self.latitude,
-            self.horizontal_accuracy_m,
-            self.reference_bundle_sha256,
-        )
         if self.status == "ground_point":
+            projected = (
+                self.geometry_origin,
+                self.longitude,
+                self.latitude,
+                self.horizontal_accuracy_m,
+                self.reference_bundle_sha256,
+            )
             if self.annotation_id is None or not all(value is not None for value in projected):
                 raise ValueError("ground_point requires sourced coordinates and accuracy")
+            if self.proposal_kind not in {None, "legacy_ground_point"}:
+                raise ValueError("ground_point is reserved for the legacy point contract")
+            self.proposal_kind = "legacy_ground_point"
+            geometry = self.geometry_geojson or {
+                "type": "Point",
+                "coordinates": [self.longitude, self.latitude],
+            }
+            validate_geojson_geometry(geometry, allowed_types={"Point"})
+            self.geometry_geojson = geometry
+        elif self.status == "projected_geometry":
+            if (
+                self.proposal_kind is None
+                or self.proposal_kind == "legacy_ground_point"
+                or self.geometry_origin is None
+                or self.horizontal_accuracy_m is None
+                or self.reference_bundle_sha256 is None
+                or self.observed_at is None
+                or self.geometry_geojson is None
+            ):
+                raise ValueError(
+                    "projected_geometry requires kind, geometry, observation time, "
+                    "origin, accuracy and reference"
+                )
+            if self.geometry_origin != "EXPLICIT_SOURCE_GEOMETRY" and self.annotation_id is None:
+                raise ValueError("projected media geometry requires a source annotation")
+            allowed_types = {
+                "active_fire_point": {"Point"},
+                "smoke_origin_point": {"Point"},
+                "visible_fire_front": {"LineString", "MultiLineString"},
+                "probable_activity_envelope": {"Polygon", "MultiPolygon"},
+                "burned_area_polygon": {"Polygon", "MultiPolygon"},
+            }[self.proposal_kind]
+            geometry = validate_geojson_geometry(
+                self.geometry_geojson,
+                allowed_types=allowed_types,
+            )
+            if geometry["type"] == "Point":
+                coordinates = geometry["coordinates"]
+                assert isinstance(coordinates, list | tuple)
+                point_longitude = float(coordinates[0])
+                point_latitude = float(coordinates[1])
+                if self.longitude is not None and self.longitude != point_longitude:
+                    raise ValueError("point longitude must match geometry_geojson")
+                if self.latitude is not None and self.latitude != point_latitude:
+                    raise ValueError("point latitude must match geometry_geojson")
+                self.longitude = point_longitude
+                self.latitude = point_latitude
+            elif any(
+                value is not None for value in (self.longitude, self.latitude, self.altitude_m)
+            ):
+                raise ValueError("non-point geometries cannot use legacy point coordinates")
         else:
             if any(
                 value is not None
                 for value in (
+                    self.proposal_kind,
                     self.geometry_origin,
                     self.longitude,
                     self.latitude,
                     self.altitude_m,
+                    self.geometry_geojson,
                     self.horizontal_accuracy_m,
                 )
             ):
@@ -977,6 +1096,53 @@ class SpatialProposalV2(StrictAgentModel):
             if not self.uncertainty_codes:
                 raise ValueError("insufficient_geometry requires an uncertainty code")
         return self
+
+
+class SpatialProposalTraceSourceV2(StrictAgentModel):
+    batch_id: SafeIdentifier
+    input_id: SafeIdentifier
+    media_type: AgentMediaType
+    media_sha256: Sha256Hex | None = None
+    source_key: str | None = Field(default=None, max_length=255)
+    source_reference_url: str | None = Field(default=None, max_length=2_048)
+    license_identifier: str | None = Field(default=None, max_length=255)
+    attribution: str | None = Field(default=None, max_length=500)
+    trust: str | None = Field(default=None, max_length=64)
+
+
+class SpatialProposalTraceAnnotationV2(StrictAgentModel):
+    annotation_id: SafeIdentifier
+    evidence_id: SafeIdentifier
+    evidence_kind: Literal["image", "frame", "satellite_image"]
+    semantic_anchor: SourceSemanticAnchorV2
+    source_geometry_normalized: dict[str, object]
+    model_score: float | None = Field(default=None, ge=0, le=1)
+
+
+class SpatialProposalTraceWindowV2(StrictAgentModel):
+    analysis_id: SafeIdentifier
+    fire_id: str = Field(pattern=r"^FR-[0-9A-Z]{2,3}-[0-9]{5}$")
+    episode_id: SafeIdentifier
+    local_date: date
+    window_start_at: datetime
+    window_end_at: datetime
+    timezone: str = Field(min_length=3, max_length=64)
+
+
+class SpatialProposalTraceV2(StrictAgentModel):
+    proposal_id: SafeIdentifier
+    status: Literal["ground_point", "projected_geometry", "insufficient_geometry"]
+    proposal_kind: SpatialProposalKindV2 | None = None
+    geometry_geojson: dict[str, object] | None = None
+    geometry_origin: str | None = Field(default=None, max_length=64)
+    horizontal_accuracy_m: float | None = Field(default=None, gt=0)
+    reference_bundle_sha256: Sha256Hex | None = None
+    uncertainty_codes: list[SafeIdentifier] = Field(default_factory=list)
+    review_state: Literal["PENDING", "VALIDATED", "REJECTED", "INVALIDATED"]
+    version: int = Field(ge=1)
+    analysis_window: SpatialProposalTraceWindowV2
+    source: SpatialProposalTraceSourceV2
+    annotation: SpatialProposalTraceAnnotationV2 | None = None
 
 
 class FactProposalV2(StrictAgentModel):

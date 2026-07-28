@@ -56,6 +56,9 @@ from fire_viewer.services.agent_source_research import (
     claim_next_source_research,
     process_claimed_source_research,
 )
+from fire_viewer.services.agent_validation_campaigns import (
+    refresh_campaign_day_review_state,
+)
 from fire_viewer.services.common import record_operator_audit
 
 ACTIVE_REMOTE_STATES = frozenset({"IN_QUEUE", "IN_PROGRESS", "RUNNING"})
@@ -412,6 +415,11 @@ def _dead_letter(
             "remote_job_id": dispatch.remote_job_id,
         },
     )
+    if dispatch.batch.analysis_window_id is not None:
+        refresh_campaign_day_review_state(
+            session,
+            analysis_window_id=dispatch.batch.analysis_window_id,
+        )
     session.commit()
 
 
