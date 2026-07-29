@@ -54,6 +54,35 @@ _ACTIVE_STATES = {
 _REQUIRED_SCOPES = {"temporary_storage", "agent_analysis", "human_review"}
 
 
+def _operation_schedule_state(
+    active_window: ActiveAnalysisWindow,
+    operation_type: AgentOperationType,
+) -> str:
+    day = active_window.campaign_day
+    if day is None or operation_type in set(day.required_operations):
+        return "required"
+    if operation_type in set(day.declared_absences):
+        return "declared_absent"
+    return "not_scheduled"
+
+
+def _require_scheduled_operation(
+    active_window: ActiveAnalysisWindow,
+    operation_type: AgentOperationType,
+) -> None:
+    schedule_state = _operation_schedule_state(active_window, operation_type)
+    if schedule_state == "declared_absent":
+        raise ConflictError(
+            "agent_operation_declared_absent",
+            "This operation is explicitly absent from the active analysis window.",
+        )
+    if schedule_state == "not_scheduled":
+        raise ConflictError(
+            "agent_operation_not_scheduled",
+            "This operation is not scheduled in the active analysis window.",
+        )
+
+
 def _incident_episode(session: Session, fire_id: str) -> tuple[IncidentSeries, Episode]:
     incident = session.execute(
         select(IncidentSeries).where(IncidentSeries.fire_id == fire_id)
@@ -147,12 +176,8 @@ def _overview(
     settings: Settings,
 ) -> AgentOperationsOverview:
     actions: list[AgentOperationStatus] = []
-    required_operations = (
-        set(active_window.campaign_day.required_operations)
-        if active_window.campaign_day is not None
-        else set(_ACTION_ORDER)
-    )
     for operation_type in _ACTION_ORDER:
+        schedule_state = _operation_schedule_state(active_window, operation_type)
         if operation_type == "source_research":
             active_runs = [
                 run
@@ -166,10 +191,12 @@ def _overview(
                 }
             ]
             blocked_reason = None
-            if not settings.agent_dispatch_enabled:
+            if schedule_state == "declared_absent":
+                blocked_reason = "operation_declared_absent"
+            elif schedule_state == "not_scheduled":
+                blocked_reason = "operation_not_scheduled"
+            elif not settings.agent_dispatch_enabled:
                 blocked_reason = "dispatch_disabled"
-            elif operation_type not in required_operations:
-                blocked_reason = "nothing_to_process"
             elif not settings.agent_research_enabled:
                 blocked_reason = "research_disabled"
             elif active_runs:
@@ -177,6 +204,7 @@ def _overview(
             actions.append(
                 AgentOperationStatus(
                     operation_type="source_research",
+                    schedule_state=schedule_state,
                     pending_files=0,
                     pending_analyses=0 if active_runs else 1,
                     running_analyses=len(active_runs),
@@ -196,17 +224,20 @@ def _overview(
         submitted = [as_utc(batch.submitted_at) for batch in matching if batch.submitted_at]
         pending_files = sum(len(batch.items) for batch in pending)
         blocked_reason = None
-        if not settings.agent_dispatch_enabled:
+        if schedule_state == "declared_absent":
+            blocked_reason = "operation_declared_absent"
+        elif schedule_state == "not_scheduled":
+            blocked_reason = "operation_not_scheduled"
+        elif not settings.agent_dispatch_enabled:
             blocked_reason = "dispatch_disabled"
-        elif operation_type not in required_operations:
-            blocked_reason = "nothing_to_process"
         elif any(batch.state in _ACTIVE_STATES for batch in matching):
             blocked_reason = "already_running"
         elif not pending:
-            blocked_reason = "nothing_to_process"
+            blocked_reason = "already_completed" if matching else "input_not_ready"
         actions.append(
             AgentOperationStatus(
                 operation_type=operation_type,
+                schedule_state=schedule_state,
                 pending_files=pending_files,
                 pending_analyses=len(pending),
                 running_analyses=sum(batch.state in _ACTIVE_STATES for batch in matching),
@@ -281,6 +312,7 @@ def run_agent_operation(
         active,
         expected_analysis_window_id=payload.expected_analysis_window_id,
     )
+    _require_scheduled_operation(active, operation_type)
     if operation_type == "source_research":
         active_research = [
             run
@@ -337,8 +369,7 @@ def run_agent_operation(
             episode_id=episode.id,
             analysis_window_id=active.window.id,
         )
-        if batch.batch_type == batch_type
-        and batch_is_allowed_for_active_campaign(batch, active)
+        if batch.batch_type == batch_type and batch_is_allowed_for_active_campaign(batch, active)
     ]
     candidates = [batch for batch in matching if _is_processable(batch)]
     if not candidates:

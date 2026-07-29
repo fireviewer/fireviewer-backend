@@ -221,6 +221,7 @@ class AgentConsentWithdrawResponse(StrictAgentModel):
 
 class AgentOperationStatus(StrictAgentModel):
     operation_type: AgentOperationType
+    schedule_state: Literal["required", "declared_absent", "not_scheduled"]
     pending_files: int = Field(ge=0)
     pending_analyses: int = Field(ge=0)
     running_analyses: int = Field(ge=0)
@@ -230,7 +231,10 @@ class AgentOperationStatus(StrictAgentModel):
         Literal[
             "dispatch_disabled",
             "research_disabled",
-            "nothing_to_process",
+            "operation_declared_absent",
+            "operation_not_scheduled",
+            "input_not_ready",
+            "already_completed",
             "already_running",
         ]
         | None

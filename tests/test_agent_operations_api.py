@@ -55,8 +55,8 @@ def test_admin_runs_each_available_analysis_type_without_technical_input(
         "local_date": local_date,
         "cutoff_at": cutoff_at.isoformat(),
         "allowed_media_sha256": [media.media_sha256],
-        "required_operations": ["user_media", "source_research", "satellite_media"],
-        "declared_absences": [],
+        "required_operations": ["user_media"],
+        "declared_absences": ["satellite_media"],
     }
     day["manifest_sha256"] = _canonical_sha256(day, "manifest_sha256")
     campaign: dict[str, object] = {
@@ -82,6 +82,7 @@ def test_admin_runs_each_available_analysis_type_without_technical_input(
     )
     assert disabled_user == {
         "operation_type": "user_media",
+        "schedule_state": "required",
         "pending_files": 1,
         "pending_analyses": 1,
         "running_analyses": 0,
@@ -118,3 +119,36 @@ def test_admin_runs_each_available_analysis_type_without_technical_input(
     assert updated_user["running_analyses"] == 1
     assert updated_user["last_run_at"] is not None
     assert updated_user["blocked_reason"] == "already_running"
+
+    overview = client.get(
+        "/api/v2/admin/agent-batches/incidents/FR-26-00001/operations",
+    )
+    assert overview.status_code == 200, overview.text
+    source_research = next(
+        action
+        for action in overview.json()["actions"]
+        if action["operation_type"] == "source_research"
+    )
+    satellite = next(
+        action
+        for action in overview.json()["actions"]
+        if action["operation_type"] == "satellite_media"
+    )
+    assert source_research["schedule_state"] == "not_scheduled"
+    assert source_research["blocked_reason"] == "operation_not_scheduled"
+    assert satellite["schedule_state"] == "declared_absent"
+    assert satellite["blocked_reason"] == "operation_declared_absent"
+
+    unscheduled = client.post(
+        "/api/v2/admin/agent-batches/incidents/FR-26-00001/operations/source_research/run",
+        json={"expected_analysis_window_id": window.analysis_id},
+    )
+    assert unscheduled.status_code == 409, unscheduled.text
+    assert unscheduled.json()["type"].endswith("agent_operation_not_scheduled")
+
+    declared_absent = client.post(
+        "/api/v2/admin/agent-batches/incidents/FR-26-00001/operations/satellite_media/run",
+        json={"expected_analysis_window_id": window.analysis_id},
+    )
+    assert declared_absent.status_code == 409, declared_absent.text
+    assert declared_absent.json()["type"].endswith("agent_operation_declared_absent")
