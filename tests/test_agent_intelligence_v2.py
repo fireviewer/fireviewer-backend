@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import func, select
@@ -11,9 +14,11 @@ from fire_viewer.db.models import (
     AgentDeadLetter,
     AgentDispatch,
     AgentFactProposal,
+    AgentMediaItem,
     AgentSituationReportRevision,
     AgentSourceAnnotation,
     AgentSpatialProposal,
+    AgentValidationCampaignDay,
     IncidentSpatialMarker,
     Job,
 )
@@ -23,9 +28,15 @@ from fire_viewer.domain.enums import (
     AgentDispatchState,
     AgentProposalReviewState,
     AgentReportReviewState,
+    AgentValidationCampaignDayState,
+)
+from fire_viewer.services.agent_daily_consolidation import (
+    _select_facts,
+    _select_spatial_proposals,
 )
 from fire_viewer.services.agent_dispatcher import run_dispatcher_once
 from fire_viewer.services.agent_traceability import get_spatial_proposal_trace
+from fire_viewer.services.agent_validation_campaigns import create_campaign_from_manifest
 
 
 class FakeRunPodV2:
@@ -50,14 +61,16 @@ class FakeRunPodV2:
         return {"id": "runpod-v2-job-0001", "status": "CANCELLED"}
 
 
-def _v2_payload(*, fire_id: str, episode_id: str) -> dict[str, object]:
+def _v2_payload(
+    *, fire_id: str, episode_id: str, batch_type: str = "external_media"
+) -> dict[str, object]:
     now = datetime.now(UTC)
     window_start = now - timedelta(days=1)
     window_end = window_start + timedelta(hours=23, minutes=59)
     return {
         "schema_version": "2.0",
         "batch_id": "agent-v2-batch-0001",
-        "batch_type": "external_media",
+        "batch_type": batch_type,
         "priority": "scheduled_combined",
         "analysis_window": {
             "analysis_id": "analysis-die-2026-07-09",
@@ -117,13 +130,17 @@ def _v2_payload(*, fire_id: str, episode_id: str) -> dict[str, object]:
     }
 
 
-def _v2_output(*, analysis_id: str = "analysis-die-2026-07-09") -> dict[str, object]:
+def _v2_output(
+    *,
+    analysis_id: str = "analysis-die-2026-07-09",
+    status: str = "succeeded",
+) -> dict[str, object]:
     now = datetime.now(UTC)
     return {
         "schema_version": "2.0",
         "batch_id": "agent-v2-batch-0001",
         "analysis_id": analysis_id,
-        "status": "succeeded",
+        "status": status,
         "retryable": False,
         "orchestration_contract_digest": "e" * 64,
         "stage_traces": [
@@ -246,7 +263,9 @@ def _v2_output(*, analysis_id: str = "analysis-die-2026-07-09") -> dict[str, obj
     }
 
 
-def _create_and_enqueue_v2(client, session, seed_incident) -> AgentDispatch:
+def _create_and_enqueue_v2(
+    client, session, seed_incident, *, batch_type: str = "external_media"
+) -> AgentDispatch:
     incident, episode = seed_incident(
         fire_id="FR-26-00001",
         sequence=1,
@@ -257,7 +276,9 @@ def _create_and_enqueue_v2(client, session, seed_incident) -> AgentDispatch:
     created = client.post(
         "/api/v2/admin/agent-batches",
         headers={"Idempotency-Key": "agent-v2-idempotency-0001"},
-        json=_v2_payload(fire_id=incident.fire_id, episode_id=episode.episode_id),
+        json=_v2_payload(
+            fire_id=incident.fire_id, episode_id=episode.episode_id, batch_type=batch_type
+        ),
     )
     assert created.status_code == 201, created.text
     assert created.json()["analysis_id"] == "analysis-die-2026-07-09"
@@ -441,3 +462,218 @@ def test_withdrawing_consent_invalidates_private_v2_results(
     assert fact is not None and fact.review_state == AgentProposalReviewState.INVALIDATED
     assert report is not None and report.review_state == AgentReportReviewState.INVALIDATED
     assert zone is not None and zone.review_state == ActiveFireZoneReviewState.REJECTED
+
+
+def _canonical_sha256(payload: dict[str, object], excluded_key: str) -> str:
+    normalized = {key: value for key, value in payload.items() if key != excluded_key}
+    return hashlib.sha256(
+        json.dumps(
+            normalized,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+
+
+def test_daily_deduplication_preserves_independent_sources() -> None:
+    observed_at = datetime(2026, 7, 12, 14, 0, tzinfo=UTC)
+
+    def fact(fact_id: str, source_media_item_id: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            fact_id=fact_id,
+            source_media_item_id=source_media_item_id,
+            evidence_kind="image",
+            evidence_id=f"image-{source_media_item_id}",
+            category="resources",
+            fact_key="firefighters",
+            as_of=observed_at,
+            value_number=120.0,
+            value_boolean=None,
+            value_text=None,
+            unit="people",
+            summary="120 pompiers engagés.",
+            certainty="explicitly_written",
+        )
+
+    first_fact = fact("fact-1", 10)
+    duplicate_fact = fact("fact-duplicate", 10)
+    corroborating_fact = fact("fact-2", 20)
+    selected_facts, contradictions = _select_facts([first_fact, duplicate_fact, corroborating_fact])
+    assert [item.fact_id for item in selected_facts] == ["fact-1", "fact-2"]
+    assert contradictions == []
+
+    def proposal(
+        proposal_id: str,
+        source_media_item_id: int,
+        source_annotation_id: int,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            proposal_id=proposal_id,
+            source_media_item_id=source_media_item_id,
+            source_annotation_id=source_annotation_id,
+            status="projected_geometry",
+            proposal_kind="active_fire_point",
+            observed_at=observed_at,
+            geometry_geojson={"type": "Point", "coordinates": [2.7, 48.4]},
+            geometry_origin="SATELLITE_GEOTRANSFORM",
+            horizontal_accuracy_m=20.0,
+            uncertainty_codes=[],
+            reference_bundle_sha256="a" * 64,
+        )
+
+    first_proposal = proposal("proposal-1", 10, 100)
+    duplicate_proposal = proposal("proposal-duplicate", 10, 100)
+    corroborating_proposal = proposal("proposal-2", 20, 200)
+    selected_proposals = _select_spatial_proposals(
+        [first_proposal, duplicate_proposal, corroborating_proposal]
+    )
+    assert [item.proposal_id for item in selected_proposals] == [
+        "proposal-1",
+        "proposal-2",
+    ]
+
+
+def test_campaign_creates_one_daily_consolidation_after_all_required_operations(
+    client, session, app, settings, seed_incident, tmp_path
+) -> None:
+    dispatch = _create_and_enqueue_v2(client, session, seed_incident, batch_type="user_media")
+    window = dispatch.batch.analysis_window
+    media = session.scalar(select(AgentMediaItem))
+    assert window is not None and media is not None and media.media_sha256 is not None
+    cutoff_at = window.window_end_at
+    if cutoff_at.tzinfo is None:
+        cutoff_at = cutoff_at.replace(tzinfo=UTC)
+    day: dict[str, object] = {
+        "ordinal": 1,
+        "fire_id": "FR-26-00001",
+        "local_date": window.local_date.isoformat(),
+        "cutoff_at": cutoff_at.isoformat(),
+        "allowed_media_sha256": [media.media_sha256],
+        "required_operations": ["user_media"],
+        "declared_absences": ["source_research", "satellite_media"],
+    }
+    day["manifest_sha256"] = _canonical_sha256(day, "manifest_sha256")
+    campaign: dict[str, object] = {
+        "schema_version": "2.0",
+        "campaign_id": "daily-consolidation-test",
+        "days": [day],
+    }
+    campaign["manifest_sha256"] = _canonical_sha256(campaign, "manifest_sha256")
+    manifest_path = tmp_path / "daily-consolidation-campaign.json"
+    manifest_path.write_text(json.dumps(campaign), encoding="utf-8")
+    create_campaign_from_manifest(
+        session,
+        manifest_path=manifest_path,
+        created_by="test-suite",
+    )
+    campaign_day = session.scalar(select(AgentValidationCampaignDay))
+    assert campaign_day is not None
+    campaign_day.state = AgentValidationCampaignDayState.RUNNING
+    session.commit()
+
+    _run_to_completion(
+        app,
+        session,
+        settings,
+        FakeRunPodV2(_v2_output(status="partial_failure")),
+    )
+
+    session.expire_all()
+    campaign_day = session.scalar(select(AgentValidationCampaignDay))
+    reports = list(session.scalars(select(AgentSituationReportRevision)))
+    zone = session.scalar(select(ActiveFireZoneRevision))
+    assert campaign_day is not None
+    assert campaign_day.state == AgentValidationCampaignDayState.REVIEW
+    assert len(reports) == 1
+    report = reports[0]
+    assert report.created_by == "daily-intelligence-consolidator"
+    assert report.reason.startswith("Daily intelligence consolidated")
+    assert report.sections_payload[0]["key"] == "_daily_consolidation"
+    assert report.sections_payload[0]["operation_outcomes"]["user_media"] == {
+        "outcome": "partial_failure",
+        "terminal": True,
+        "states": ["PARTIAL_FAILURE"],
+    }
+    assert report.sections_payload[0]["operation_outcomes"]["source_research"] == {
+        "outcome": "absent",
+        "terminal": True,
+        "states": [],
+    }
+    assert report.sections_payload[0]["spatial_counts"] == {
+        "insufficient_geometry": 1,
+        "legacy_ground_point": 1,
+    }
+    assert len(report.fact_links) == 1
+    assert zone is not None
+    assert zone.analysis_window_id == window.id
+
+    from fire_viewer.services.agent_validation_campaigns import (
+        refresh_campaign_day_review_state,
+    )
+
+    assert refresh_campaign_day_review_state(session, analysis_window_id=window.id) is False
+    assert session.scalar(select(func.count()).select_from(AgentSituationReportRevision)) == 1
+
+
+def test_campaign_reviews_failed_operation_without_content_threshold(
+    client, session, app, settings, seed_incident, tmp_path
+) -> None:
+    dispatch = _create_and_enqueue_v2(client, session, seed_incident, batch_type="user_media")
+    window = dispatch.batch.analysis_window
+    media = session.scalar(select(AgentMediaItem))
+    assert window is not None and media is not None and media.media_sha256 is not None
+    cutoff_at = window.window_end_at
+    if cutoff_at.tzinfo is None:
+        cutoff_at = cutoff_at.replace(tzinfo=UTC)
+    day: dict[str, object] = {
+        "ordinal": 1,
+        "fire_id": "FR-26-00001",
+        "local_date": window.local_date.isoformat(),
+        "cutoff_at": cutoff_at.isoformat(),
+        "allowed_media_sha256": [media.media_sha256],
+        "required_operations": ["user_media"],
+        "declared_absences": ["source_research", "satellite_media"],
+    }
+    day["manifest_sha256"] = _canonical_sha256(day, "manifest_sha256")
+    campaign: dict[str, object] = {
+        "schema_version": "2.0",
+        "campaign_id": "failed-operation-review-test",
+        "days": [day],
+    }
+    campaign["manifest_sha256"] = _canonical_sha256(campaign, "manifest_sha256")
+    manifest_path = tmp_path / "failed-operation-campaign.json"
+    manifest_path.write_text(json.dumps(campaign), encoding="utf-8")
+    create_campaign_from_manifest(
+        session,
+        manifest_path=manifest_path,
+        created_by="test-suite",
+    )
+    campaign_day = session.scalar(select(AgentValidationCampaignDay))
+    assert campaign_day is not None
+    campaign_day.state = AgentValidationCampaignDayState.RUNNING
+    session.commit()
+
+    _run_to_completion(
+        app,
+        session,
+        settings,
+        FakeRunPodV2(_v2_output(status="failed")),
+    )
+
+    session.expire_all()
+    completed = session.scalar(select(AgentDispatch))
+    campaign_day = session.scalar(select(AgentValidationCampaignDay))
+    report = session.scalar(select(AgentSituationReportRevision))
+    assert completed is not None and completed.state == AgentDispatchState.DEAD_LETTER
+    assert campaign_day is not None
+    assert campaign_day.state == AgentValidationCampaignDayState.REVIEW
+    assert report is not None
+    assert report.sections_payload[0]["operation_outcomes"]["user_media"] == {
+        "outcome": "failed",
+        "terminal": True,
+        "states": ["DEAD_LETTER"],
+    }
+    assert report.sections_payload[0]["fact_ids"] == []
+    assert report.sections_payload[0]["spatial_proposal_ids"] == []
+    assert session.scalar(select(func.count()).select_from(ActiveFireZoneRevision)) == 0

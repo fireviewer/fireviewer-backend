@@ -329,6 +329,14 @@ def _dead_letter(
         trace_id=run.trace_id,
         after={"state": run.state.value, "error_code": run.last_error_code},
     )
+    from fire_viewer.services.agent_validation_campaigns import (
+        refresh_campaign_day_review_state,
+    )
+
+    refresh_campaign_day_review_state(
+        session,
+        analysis_window_id=run.analysis_window_id,
+    )
     session.commit()
 
 
@@ -759,6 +767,14 @@ def _persist_output(
             "publication_authorized": False,
         },
     )
+    from fire_viewer.services.agent_validation_campaigns import (
+        refresh_campaign_day_review_state,
+    )
+
+    refresh_campaign_day_review_state(
+        session,
+        analysis_window_id=run.analysis_window_id,
+    )
     session.commit()
 
 
@@ -827,6 +843,14 @@ def _poll(
     run.completed_at = now
     run.next_attempt_at = None
     _release(run)
+    from fire_viewer.services.agent_validation_campaigns import (
+        refresh_campaign_day_review_state,
+    )
+
+    refresh_campaign_day_review_state(
+        session,
+        analysis_window_id=run.analysis_window_id,
+    )
     session.commit()
 
 
@@ -868,6 +892,14 @@ def process_claimed_source_research(
         run.completed_at = utcnow()
         run.next_attempt_at = None
         _release(run)
+        from fire_viewer.services.agent_validation_campaigns import (
+            refresh_campaign_day_review_state,
+        )
+
+        refresh_campaign_day_review_state(
+            session,
+            analysis_window_id=run.analysis_window_id,
+        )
         session.commit()
     else:
         _poll(session, run, worker_id=worker_id, settings=settings, client=client)

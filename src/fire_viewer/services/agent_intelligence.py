@@ -19,6 +19,7 @@ from fire_viewer.db.models import (
     AgentSituationReportRevision,
     AgentSourceAnnotation,
     AgentSpatialProposal,
+    AgentValidationCampaignDay,
 )
 from fire_viewer.domain.agent_schemas import WorkerItemResultV2, WorkerOutputV2
 from fire_viewer.domain.enums import (
@@ -348,9 +349,18 @@ def persist_worker_output_v2(
             facts_by_public_id[fact.fact_id] = stored_fact
     session.flush()
 
-    _refresh_daily_activity_zone(session, dispatch, worker_id=worker_id)
+    campaign_day_exists = (
+        session.scalar(
+            select(AgentValidationCampaignDay.id).where(
+                AgentValidationCampaignDay.analysis_window_id == analysis_window.id
+            )
+        )
+        is not None
+    )
+    if not campaign_day_exists:
+        _refresh_daily_activity_zone(session, dispatch, worker_id=worker_id)
 
-    if output.report_draft is not None:
+    if output.report_draft is not None and not campaign_day_exists:
         latest_revision = session.scalar(
             select(func.max(AgentSituationReportRevision.revision)).where(
                 AgentSituationReportRevision.analysis_window_id == analysis_window.id
@@ -378,4 +388,6 @@ def persist_worker_output_v2(
         ]
         session.add(report)
 
-    analysis_window.state = AgentAnalysisState.REVIEW_PENDING
+    analysis_window.state = (
+        AgentAnalysisState.PROCESSING if campaign_day_exists else AgentAnalysisState.REVIEW_PENDING
+    )

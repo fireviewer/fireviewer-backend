@@ -50,13 +50,33 @@ _ACTIVE_DAY_STATES = {
     AgentValidationCampaignDayState.REVIEW,
 }
 _OPERATIONS = {"user_media", "source_research", "satellite_media"}
-_SUCCESSFUL_BATCH_STATES = {
+_TERMINAL_BATCH_STATES = {
     AgentBatchState.SUCCEEDED,
     AgentBatchState.PARTIAL_FAILURE,
+    AgentBatchState.FAILED,
+    AgentBatchState.DEAD_LETTER,
+    AgentBatchState.CANCELLED,
 }
-_SUCCESSFUL_RESEARCH_STATES = {
+_TERMINAL_RESEARCH_STATES = {
     AgentSourceResearchState.SUCCEEDED,
     AgentSourceResearchState.PARTIAL_FAILURE,
+    AgentSourceResearchState.FAILED,
+    AgentSourceResearchState.DEAD_LETTER,
+    AgentSourceResearchState.CANCELLED,
+}
+_FAILED_STATE_VALUES = {
+    AgentBatchState.FAILED.value,
+    AgentBatchState.DEAD_LETTER.value,
+    AgentSourceResearchState.FAILED.value,
+    AgentSourceResearchState.DEAD_LETTER.value,
+}
+_PARTIAL_STATE_VALUES = {
+    AgentBatchState.PARTIAL_FAILURE.value,
+    AgentSourceResearchState.PARTIAL_FAILURE.value,
+}
+_CANCELLED_STATE_VALUES = {
+    AgentBatchState.CANCELLED.value,
+    AgentSourceResearchState.CANCELLED.value,
 }
 
 
@@ -190,7 +210,10 @@ def refresh_campaign_day_review_state(
     *,
     analysis_window_id: int,
 ) -> bool:
-    """Move a running campaign day to review once every required operation is done."""
+    """Move a day to review once every required operation is terminal.
+
+    The gate never depends on media or proposal counts and never requires success.
+    """
 
     day = session.scalar(
         select(AgentValidationCampaignDay)
@@ -201,9 +224,7 @@ def refresh_campaign_day_review_state(
         return False
     batches = list(
         session.scalars(
-            select(AgentMediaBatch).where(
-                AgentMediaBatch.analysis_window_id == analysis_window_id
-            )
+            select(AgentMediaBatch).where(AgentMediaBatch.analysis_window_id == analysis_window_id)
         )
     )
     research_runs = list(
@@ -214,27 +235,75 @@ def refresh_campaign_day_review_state(
         )
     )
 
-    def batches_complete(batch_type: AgentBatchType) -> bool:
+    declared_absences = set(day.declared_absences)
+
+    def summarize(
+        operation: str,
+        states: list[str],
+        *,
+        present: bool,
+        terminal: bool,
+    ) -> dict[str, Any]:
+        if operation in declared_absences:
+            return {"outcome": "absent", "terminal": True, "states": []}
+        if not present:
+            return {"outcome": "not_started", "terminal": False, "states": []}
+        if not terminal:
+            return {"outcome": "running", "terminal": False, "states": states}
+        if any(state in _FAILED_STATE_VALUES for state in states):
+            outcome = "failed"
+        elif any(state in _PARTIAL_STATE_VALUES for state in states):
+            outcome = "partial_failure"
+        elif states and all(state in _CANCELLED_STATE_VALUES for state in states):
+            outcome = "cancelled"
+        elif any(state in _CANCELLED_STATE_VALUES for state in states):
+            outcome = "partial_failure"
+        else:
+            outcome = "succeeded"
+        return {"outcome": outcome, "terminal": True, "states": states}
+
+    def batch_outcome(operation: str, batch_type: AgentBatchType) -> dict[str, Any]:
         matching = [batch for batch in batches if batch.batch_type == batch_type]
-        return bool(matching) and all(
-            batch.state in _SUCCESSFUL_BATCH_STATES for batch in matching
+        states = [batch.state.value for batch in matching]
+        return summarize(
+            operation,
+            states,
+            present=bool(matching),
+            terminal=bool(matching)
+            and all(batch.state in _TERMINAL_BATCH_STATES for batch in matching),
         )
 
-    completed = {
-        "user_media": batches_complete(AgentBatchType.USER_MEDIA),
-        "satellite_media": batches_complete(AgentBatchType.SATELLITE_MEDIA),
-        "source_research": (
-            bool(research_runs)
-            and all(run.state in _SUCCESSFUL_RESEARCH_STATES for run in research_runs)
-            and all(
-                batch.state in _SUCCESSFUL_BATCH_STATES
-                for batch in batches
-                if batch.batch_type == AgentBatchType.EXTERNAL_MEDIA
-            )
+    external_batches = [
+        batch for batch in batches if batch.batch_type == AgentBatchType.EXTERNAL_MEDIA
+    ]
+    research_states = [run.state.value for run in research_runs]
+    external_states = [batch.state.value for batch in external_batches]
+    operation_outcomes = {
+        "user_media": batch_outcome("user_media", AgentBatchType.USER_MEDIA),
+        "satellite_media": batch_outcome("satellite_media", AgentBatchType.SATELLITE_MEDIA),
+        "source_research": summarize(
+            "source_research",
+            research_states + external_states,
+            present=bool(research_runs),
+            terminal=bool(research_runs)
+            and all(run.state in _TERMINAL_RESEARCH_STATES for run in research_runs)
+            and all(batch.state in _TERMINAL_BATCH_STATES for batch in external_batches),
         ),
     }
-    if not all(completed[operation] for operation in day.required_operations):
+    if not all(
+        bool(operation_outcomes[operation]["terminal"]) for operation in day.required_operations
+    ):
         return False
+
+    from fire_viewer.services.agent_daily_consolidation import (
+        consolidate_daily_intelligence,
+    )
+
+    consolidate_daily_intelligence(
+        session,
+        analysis_window_id=analysis_window_id,
+        operation_outcomes=operation_outcomes,
+    )
     day.state = AgentValidationCampaignDayState.REVIEW
     day.analysis_window.state = AgentAnalysisState.REVIEW_PENDING
     day.version += 1
@@ -265,8 +334,7 @@ def refresh_campaign_day_publication_state(
         select(ActiveFireZoneRevision)
         .where(
             ActiveFireZoneRevision.analysis_window_id == analysis_window_id,
-            ActiveFireZoneRevision.review_state
-            == ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
+            ActiveFireZoneRevision.review_state == ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
         )
         .order_by(ActiveFireZoneRevision.revision.desc())
         .limit(1)
@@ -373,28 +441,26 @@ def create_campaign_from_manifest(
         if cutoff_at.tzinfo is None or cutoff_at.utcoffset() is None:
             raise ValueError(f"campaign day {ordinal} cutoff_at must be timezone-aware")
         allowed_hashes = raw_day.get("allowed_media_sha256")
-        if (
-            not isinstance(allowed_hashes, list)
-            or any(
-                not isinstance(value, str)
-                or len(value) != 64
-                or any(character not in "0123456789abcdef" for character in value)
-                for value in allowed_hashes
-            )
+        if not isinstance(allowed_hashes, list) or any(
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in allowed_hashes
         ):
             raise ValueError(f"campaign day {ordinal} has invalid media hashes")
         if seen_hashes.intersection(allowed_hashes):
             raise ValueError("the same media SHA-256 cannot feed two campaign days")
         seen_hashes.update(allowed_hashes)
         required = raw_day.get("required_operations")
-        if (
-            not isinstance(required, list)
-            or not required
-            or set(required).difference(_OPERATIONS)
-        ):
+        if not isinstance(required, list) or not required or set(required).difference(_OPERATIONS):
             raise ValueError(f"campaign day {ordinal} has invalid required operations")
         absences = raw_day.get("declared_absences", [])
-        if not isinstance(absences, list) or any(not isinstance(value, str) for value in absences):
+        if (
+            not isinstance(absences, list)
+            or any(not isinstance(value, str) for value in absences)
+            or set(absences).difference(_OPERATIONS)
+            or set(absences).intersection(required)
+        ):
             raise ValueError(f"campaign day {ordinal} has invalid declared absences")
         window = ensure_daily_analysis_window(
             session,
@@ -403,9 +469,7 @@ def create_campaign_from_manifest(
             local_date=local_date,
         )
         if as_utc(window.window_end_at) != as_utc(cutoff_at):
-            raise ValueError(
-                f"campaign day {ordinal} cutoff must equal the immutable window end"
-            )
+            raise ValueError(f"campaign day {ordinal} cutoff must equal the immutable window end")
         session.add(
             AgentValidationCampaignDay(
                 campaign_day_id=new_prefixed_id("campaign-day"),
