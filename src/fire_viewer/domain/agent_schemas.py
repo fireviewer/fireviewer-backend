@@ -502,6 +502,9 @@ class AgentSourceResearchResponse(StrictAgentModel):
     queued_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    retryable: bool
+    last_error_code: str | None
+    last_error_detail: str | None
     candidates: list[AgentSourceCandidateResponse]
 
 

@@ -111,6 +111,7 @@ def _load_run(session: Session, research_id: str) -> AgentSourceResearchRun:
 
 
 def _response(run: AgentSourceResearchRun) -> AgentSourceResearchResponse:
+    result_summary = run.result_summary or {}
     return AgentSourceResearchResponse(
         research_id=run.research_id,
         fire_id=run.incident.fire_id,
@@ -122,6 +123,9 @@ def _response(run: AgentSourceResearchRun) -> AgentSourceResearchResponse:
         queued_at=as_utc(run.queued_at),
         started_at=as_utc(run.started_at) if run.started_at else None,
         completed_at=as_utc(run.completed_at) if run.completed_at else None,
+        retryable=bool(result_summary.get("retryable", False)),
+        last_error_code=run.last_error_code,
+        last_error_detail=run.last_error_detail,
         candidates=[
             AgentSourceCandidateResponse(
                 candidate_id=candidate.candidate_id,
@@ -632,6 +636,70 @@ def _persist_output(
     expected_revision = settings.agent_expected_model_revisions.get("source_research")
     if expected_revision and output.model_run.revision != expected_revision:
         raise ValueError("source research model revision does not match the pinned backend value")
+
+    # A completed RunPod request can still carry a failed *business* result from
+    # the isolated research worker.  This is terminal for this operation, but it
+    # is not a completed discovery: do not promote any candidate that might have
+    # been present in a malformed or partial failure response.
+    if output.status == "failed":
+        worker_error_code = output.model_run.error_code or "agent_research_worker_failed"
+        worker_error_detail = (
+            output.validation_errors[0]
+            if output.validation_errors
+            else "The source-research worker returned a failed result."
+        )
+        run.output_hash = sha256_hex(output)
+        run.progress_percent = 100
+        run.state = AgentSourceResearchState.FAILED
+        run.completed_at = utcnow()
+        run.next_attempt_at = None
+        run.last_error_code = worker_error_code[:128]
+        run.last_error_detail = worker_error_detail[:1_000]
+        run.result_summary = {
+            **(run.result_summary or {}),
+            "worker_status": output.status,
+            "worker_model_status": output.model_run.status,
+            "worker_error_code": output.model_run.error_code,
+            "retryable": output.retryable,
+            "validation_error_count": len(output.validation_errors),
+            "reported_candidate_count": len(output.candidates),
+            "candidate_count": 0,
+            "accepted_count": 0,
+            "analysis_batch_ids": [],
+            "enqueued_analysis_batch_ids": [],
+            "human_review_required": True,
+            "publication_authorized": False,
+        }
+        _release(run)
+        record_operator_audit(
+            session,
+            actor=_system_actor(worker_id),
+            action="agent.source_research_failed",
+            target_type="agent_source_research",
+            target_id=run.research_id,
+            reason=(
+                "The source-research worker returned a failed result; no candidate was promoted."
+            ),
+            trace_id=run.trace_id,
+            after={
+                "state": run.state.value,
+                "error_code": run.last_error_code,
+                "retryable": output.retryable,
+                "reported_candidates": len(output.candidates),
+                "publication_authorized": False,
+            },
+        )
+        from fire_viewer.services.agent_validation_campaigns import (
+            refresh_campaign_day_review_state,
+        )
+
+        refresh_campaign_day_review_state(
+            session,
+            analysis_window_id=run.analysis_window_id,
+        )
+        session.commit()
+        return
+
     store = build_object_store(settings)
     existing_url_hashes = set(session.scalars(select(AgentSourceCandidate.canonical_url_hash)))
     existing_media_hashes = {
@@ -728,6 +796,11 @@ def _persist_output(
         "human_review_required": True,
         "publication_authorized": False,
         "analysis_batch_ids": batch_ids,
+        "worker_status": output.status,
+        "worker_model_status": output.model_run.status,
+        "worker_error_code": output.model_run.error_code,
+        "retryable": output.retryable,
+        "validation_error_count": len(output.validation_errors),
     }
     run.output_hash = sha256_hex(output)
     run.progress_percent = 95
@@ -763,21 +836,47 @@ def _persist_output(
         run.state = AgentSourceResearchState.PARTIAL_FAILURE
     run.completed_at = utcnow()
     run.next_attempt_at = None
-    run.last_error_code = "agent_research_media_enqueue_failed" if enqueue_errors else None
-    run.last_error_detail = "; ".join(enqueue_errors)[:1_000] or None
+    partial_worker_error_code = (
+        output.model_run.error_code if output.status == "partial_failure" else None
+    )
+    partial_worker_error_detail = (
+        output.validation_errors[0]
+        if output.status == "partial_failure" and output.validation_errors
+        else None
+    )
+    if enqueue_errors:
+        run.last_error_code = "agent_research_media_enqueue_failed"
+        run.last_error_detail = "; ".join(enqueue_errors)[:1_000]
+    else:
+        run.last_error_code = (
+            partial_worker_error_code[:128] if partial_worker_error_code else None
+        )
+        run.last_error_detail = (
+            partial_worker_error_detail[:1_000] if partial_worker_error_detail else None
+        )
     run.result_summary = {
         **(run.result_summary or {}),
         "enqueued_analysis_batch_ids": enqueued_batch_ids,
         "enqueue_error_count": len(enqueue_errors),
     }
     _release(run)
+    audit_action = (
+        "agent.source_research_partial_failure"
+        if run.state == AgentSourceResearchState.PARTIAL_FAILURE
+        else "agent.source_research_completed"
+    )
+    audit_reason = (
+        "Research candidates were persisted, but one or more worker or enqueue steps failed."
+        if run.state == AgentSourceResearchState.PARTIAL_FAILURE
+        else "Research candidates persisted privately with temporal and duplicate checks."
+    )
     record_operator_audit(
         session,
         actor=_system_actor(worker_id),
-        action="agent.source_research_completed",
+        action=audit_action,
         target_type="agent_source_research",
         target_id=run.research_id,
-        reason="Research candidates persisted privately with temporal and duplicate checks.",
+        reason=audit_reason,
         trace_id=run.trace_id,
         after={
             "state": run.state.value,

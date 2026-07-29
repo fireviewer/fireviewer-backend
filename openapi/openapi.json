@@ -16728,6 +16728,32 @@
             ],
             "title": "Completed At"
           },
+          "retryable": {
+            "type": "boolean",
+            "title": "Retryable"
+          },
+          "last_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error Code"
+          },
+          "last_error_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error Detail"
+          },
           "candidates": {
             "items": {
               "$ref": "#/components/schemas/AgentSourceCandidateResponse"
@@ -16749,6 +16775,9 @@
           "queued_at",
           "started_at",
           "completed_at",
+          "retryable",
+          "last_error_code",
+          "last_error_detail",
           "candidates"
         ],
         "title": "AgentSourceResearchResponse"

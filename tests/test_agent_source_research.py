@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pydantic import SecretStr
 from sqlalchemy import func, select
 
+from fire_viewer.core.security import Actor
 from fire_viewer.db.models import (
     AgentAnalysisWindow,
     AgentDispatch,
@@ -14,6 +15,7 @@ from fire_viewer.db.models import (
     AgentMediaItem,
     AgentSourceCandidate,
     AgentSourceResearchRun,
+    AuditEvent,
     Job,
 )
 from fire_viewer.domain.enums import (
@@ -23,6 +25,7 @@ from fire_viewer.domain.enums import (
     AgentSourceResearchState,
 )
 from fire_viewer.services.agent_dispatcher import run_dispatcher_once
+from fire_viewer.services.agent_source_research import create_source_research
 from fire_viewer.services.agent_validation_campaigns import create_campaign_from_manifest
 from fire_viewer.services.blob_uploads import BlobUploadGrant
 from test_agent_source_packages import _prepare_upload
@@ -52,7 +55,7 @@ class _ResearchRunPod:
     def submit(self, payload) -> dict[str, object]:
         self.payload = dict(payload)
         self.submissions += 1
-        return {"id": "research-job-0001", "status": "IN_QUEUE"}
+        return {"id": f"research-job-{self.submissions:04}", "status": "IN_QUEUE"}
 
     def status(self, _remote_job_id: str) -> dict[str, object]:
         self.status_reads += 1
@@ -64,6 +67,11 @@ class _ResearchRunPod:
 
     def cancel(self, _remote_job_id: str) -> dict[str, object]:
         return {"id": "research-job-0001", "status": "CANCELLED"}
+
+
+class _ResearchPathStore:
+    def pathname_for(self, value: str) -> str:
+        return f"private/{value}"
 
 
 def _research_output(
@@ -147,6 +155,42 @@ def _research_output(
             },
         ],
         "validation_errors": [],
+    }
+
+
+def _failed_research_output(*, research_id: str) -> dict[str, object]:
+    now = datetime.now(UTC)
+    return {
+        "schema_version": "research-1.0",
+        "research_id": research_id,
+        "status": "failed",
+        "retryable": True,
+        "model_run": {
+            "model_role": "source_research",
+            "model_id": "Qwen/Qwen3-4B-Instruct-2507",
+            "revision": PINNED_RESEARCH_REVISION,
+            "status": "failed",
+            "started_at": (now - timedelta(seconds=2)).isoformat(),
+            "finished_at": now.isoformat(),
+            "load_ms": 900,
+            "inference_ms": 800,
+            "peak_vram_bytes": 9_000_000_000,
+            "error_code": "sandboxed_research_process_failed",
+        },
+        "queries": [],
+        "candidates": [
+            {
+                "candidate_id": "must-not-be-promoted",
+                "canonical_url": "https://mairie-die.fr/actualite/partial-output",
+                "source_domain": "mairie-die.fr",
+                "published_at": "2026-07-09T08:00:00+02:00",
+                "media_type": "article",
+                "excerpt": "A failed worker output must never promote this candidate.",
+            }
+        ],
+        "validation_errors": [
+            "model startup failed"
+        ],
     }
 
 
@@ -326,6 +370,11 @@ def test_research_uses_real_contract_cutoff_dedup_and_shared_dispatcher(
     assert completed.state == AgentSourceResearchState.SUCCEEDED
     assert runpod.submissions == 1
     assert runpod.status_reads == 1
+    success_response = client.get(f"/api/v2/admin/agent-batches/source-research/{research_id}")
+    assert success_response.status_code == 200, success_response.text
+    assert success_response.json()["retryable"] is False
+    assert success_response.json()["last_error_code"] is None
+    assert success_response.json()["last_error_detail"] is None
     candidates = {
         candidate.candidate_id: candidate
         for candidate in session.scalars(select(AgentSourceCandidate))
@@ -352,3 +401,79 @@ def test_research_uses_real_contract_cutoff_dedup_and_shared_dispatcher(
     assert package_pathname in store.files
     assert runpod.submissions == 1
     assert runpod.status_reads == 1
+
+    monkeypatch.setattr(
+        "fire_viewer.services.agent_source_research.build_object_store",
+        lambda _settings: _ResearchPathStore(),
+    )
+    failed_research = create_source_research(
+        session,
+        fire_id="FR-26-00001",
+        expected_analysis_window_id=window.analysis_id,
+        location_hint="Die, massif de Justin",
+        actor=Actor(actor_id="test-suite", roles=frozenset()),
+        trace_id="tr-source-research-failure",
+        settings=settings,
+    )
+    failed_research_id = failed_research.research_id
+    runpod.output = _failed_research_output(research_id=failed_research_id)
+
+    assert run_dispatcher_once(
+        client.app.state.session_factory,
+        worker_id="research-dispatcher-test",
+        settings=settings,
+        client=runpod,
+    )
+    session.expire_all()
+    submitted_failure = session.scalar(
+        select(AgentSourceResearchRun).where(
+            AgentSourceResearchRun.research_id == failed_research_id
+        )
+    )
+    assert submitted_failure is not None
+    submitted_failure.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+    submitted_failure.lease_owner = None
+    submitted_failure.lease_until = None
+    session.commit()
+    assert run_dispatcher_once(
+        client.app.state.session_factory,
+        worker_id="research-dispatcher-test",
+        settings=settings,
+        client=runpod,
+    )
+
+    session.expire_all()
+    failed_run = session.scalar(
+        select(AgentSourceResearchRun).where(
+            AgentSourceResearchRun.research_id == failed_research_id
+        )
+    )
+    assert failed_run is not None
+    assert failed_run.state == AgentSourceResearchState.FAILED
+    assert failed_run.last_error_code == "sandboxed_research_process_failed"
+    assert failed_run.last_error_detail == "model startup failed"
+    assert failed_run.result_summary["retryable"] is True
+    assert failed_run.result_summary["reported_candidate_count"] == 1
+    assert failed_run.result_summary["candidate_count"] == 0
+    assert session.scalar(
+        select(func.count())
+        .select_from(AgentSourceCandidate)
+        .where(AgentSourceCandidate.research_run_id == failed_run.id)
+    ) == 0
+    audit = session.scalar(
+        select(AuditEvent)
+        .where(
+            AuditEvent.target_id == failed_research_id,
+            AuditEvent.action == "agent.source_research_failed",
+        )
+        .order_by(AuditEvent.occurred_at.desc())
+    )
+    assert audit is not None
+    assert audit.after_snapshot["error_code"] == "sandboxed_research_process_failed"
+
+    response = client.get(f"/api/v2/admin/agent-batches/source-research/{failed_research_id}")
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "FAILED"
+    assert response.json()["retryable"] is True
+    assert response.json()["last_error_code"] == "sandboxed_research_process_failed"
+    assert response.json()["last_error_detail"] == failed_run.last_error_detail
