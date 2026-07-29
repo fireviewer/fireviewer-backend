@@ -3598,6 +3598,138 @@
         }
       }
     },
+    "/api/v1/admin/incidents/{fire_id}/agent-facts/{fact_id}/review": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Review Incident Agent Fact",
+        "operationId": "review_incident_agent_fact_api_v1_admin_incidents__fire_id__agent_facts__fact_id__review_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "fire_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Fire Id"
+            }
+          },
+          {
+            "name": "fact_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Fact Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentFactReviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAgentFactProposal"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/incidents/{fire_id}/agent-situation-reports/{report_revision_id}/review": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Review Incident Agent Situation Report",
+        "operationId": "review_incident_agent_situation_report_api_v1_admin_incidents__fire_id__agent_situation_reports__report_revision_id__review_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "fire_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Fire Id"
+            }
+          },
+          {
+            "name": "report_revision_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Report Revision Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentSituationReportReviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAgentSituationReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/admin/reports": {
       "get": {
         "tags": [
@@ -6256,16 +6388,6 @@
               "pattern": "^FR-[0-9A-Z]{2,3}-[0-9]{5}$",
               "title": "Fire Id"
             }
-          },
-          {
-            "name": "local_date",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-              "title": "Local Date"
-            }
           }
         ],
         "responses": {
@@ -6863,6 +6985,161 @@
         ],
         "title": "AdminActiveFireZoneRevision"
       },
+      "AdminAgentEvidenceReference": {
+        "properties": {
+          "batch_id": {
+            "type": "string",
+            "title": "Batch Id"
+          },
+          "input_id": {
+            "type": "string",
+            "title": "Input Id"
+          },
+          "media_type": {
+            "type": "string",
+            "title": "Media Type"
+          },
+          "media_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Media Sha256"
+          },
+          "evidence_kind": {
+            "type": "string",
+            "title": "Evidence Kind"
+          },
+          "evidence_id": {
+            "type": "string",
+            "title": "Evidence Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "batch_id",
+          "input_id",
+          "media_type",
+          "evidence_kind",
+          "evidence_id"
+        ],
+        "title": "AdminAgentEvidenceReference"
+      },
+      "AdminAgentFactProposal": {
+        "properties": {
+          "fact_id": {
+            "type": "string",
+            "title": "Fact Id"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "fact_key": {
+            "type": "string",
+            "title": "Fact Key"
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time",
+            "title": "As Of"
+          },
+          "certainty": {
+            "type": "string",
+            "title": "Certainty"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "value_number": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Number"
+          },
+          "value_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Text"
+          },
+          "value_boolean": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Boolean"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          },
+          "conflict_group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conflict Group Id"
+          },
+          "review_state": {
+            "$ref": "#/components/schemas/AgentProposalReviewState"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Version"
+          },
+          "source": {
+            "$ref": "#/components/schemas/AdminAgentEvidenceReference"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "fact_id",
+          "category",
+          "fact_key",
+          "as_of",
+          "certainty",
+          "summary",
+          "review_state",
+          "version",
+          "source"
+        ],
+        "title": "AdminAgentFactProposal"
+      },
       "AdminAgentReviewPackage": {
         "properties": {
           "review_id": {
@@ -6917,6 +7194,80 @@
           "state"
         ],
         "title": "AdminAgentReviewPackage"
+      },
+      "AdminAgentSituationReport": {
+        "properties": {
+          "report_revision_id": {
+            "type": "string",
+            "title": "Report Revision Id"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Revision"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "body_markdown": {
+            "type": "string",
+            "title": "Body Markdown"
+          },
+          "review_state": {
+            "$ref": "#/components/schemas/AgentReportReviewState"
+          },
+          "reviewed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed By"
+          },
+          "reviewed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed At"
+          },
+          "review_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Reason"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "report_revision_id",
+          "revision",
+          "title",
+          "body_markdown",
+          "review_state",
+          "created_at"
+        ],
+        "title": "AdminAgentSituationReport"
       },
       "AdminAuditListResponse": {
         "properties": {
@@ -7421,6 +7772,69 @@
           "expected_version"
         ],
         "title": "AdminContributionProposalReviewRequest"
+      },
+      "AdminDailyIntelligenceReview": {
+        "properties": {
+          "analysis_id": {
+            "type": "string",
+            "title": "Analysis Id"
+          },
+          "local_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Local Date"
+          },
+          "window_state": {
+            "type": "string",
+            "title": "Window State"
+          },
+          "report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdminAgentSituationReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "facts": {
+            "items": {
+              "$ref": "#/components/schemas/AdminAgentFactProposal"
+            },
+            "type": "array",
+            "maxItems": 2000,
+            "title": "Facts"
+          },
+          "operation_outcomes": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Operation Outcomes"
+          },
+          "spatial_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Spatial Counts"
+          },
+          "contradictions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Contradictions"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "analysis_id",
+          "local_date",
+          "window_state"
+        ],
+        "title": "AdminDailyIntelligenceReview"
       },
       "AdminDashboardPriorityItem": {
         "properties": {
@@ -10880,6 +11294,14 @@
             "type": "array",
             "maxItems": 200,
             "title": "Agent Reviews"
+          },
+          "daily_intelligence": {
+            "items": {
+              "$ref": "#/components/schemas/AdminDailyIntelligenceReview"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Daily Intelligence"
           }
         },
         "additionalProperties": false,
@@ -14927,6 +15349,37 @@
         ],
         "title": "AgentDispatcherTickResponse"
       },
+      "AgentFactReviewRequest": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "validate",
+              "reject"
+            ],
+            "title": "Action"
+          },
+          "expected_version": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Expected Version"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 10,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "action",
+          "expected_version",
+          "reason"
+        ],
+        "title": "AgentFactReviewRequest"
+      },
       "AgentFrameInput": {
         "properties": {
           "frame_id": {
@@ -15270,29 +15723,16 @@
       },
       "AgentOperationRunRequest": {
         "properties": {
-          "local_date": {
+          "expected_analysis_window_id": {
             "type": "string",
-            "format": "date",
-            "title": "Local Date"
-          },
-          "location_hint": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 500,
-                "minLength": 2
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Location Hint"
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "title": "Expected Analysis Window Id"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "local_date"
+          "expected_analysis_window_id"
         ],
         "title": "AgentOperationRunRequest"
       },
@@ -15307,6 +15747,11 @@
             "type": "string",
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
             "title": "Episode Id"
+          },
+          "analysis_window_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "title": "Analysis Window Id"
           },
           "operation_type": {
             "type": "string",
@@ -15336,6 +15781,7 @@
         "required": [
           "fire_id",
           "episode_id",
+          "analysis_window_id",
           "operation_type",
           "operation_ids",
           "queued_files"
@@ -15352,6 +15798,15 @@
               "satellite_media"
             ],
             "title": "Operation Type"
+          },
+          "schedule_state": {
+            "type": "string",
+            "enum": [
+              "required",
+              "declared_absent",
+              "not_scheduled"
+            ],
+            "title": "Schedule State"
           },
           "pending_files": {
             "type": "integer",
@@ -15391,7 +15846,10 @@
                 "enum": [
                   "dispatch_disabled",
                   "research_disabled",
-                  "nothing_to_process",
+                  "operation_declared_absent",
+                  "operation_not_scheduled",
+                  "input_not_ready",
+                  "already_completed",
                   "already_running"
                 ]
               },
@@ -15406,6 +15864,7 @@
         "type": "object",
         "required": [
           "operation_type",
+          "schedule_state",
           "pending_files",
           "pending_analyses",
           "running_analyses",
@@ -15425,10 +15884,34 @@
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
             "title": "Episode Id"
           },
+          "analysis_window_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "title": "Analysis Window Id"
+          },
           "local_date": {
             "type": "string",
             "format": "date",
             "title": "Local Date"
+          },
+          "campaign_day_state": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "locked",
+                  "ready",
+                  "running",
+                  "review",
+                  "published",
+                  "failed"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campaign Day State"
           },
           "actions": {
             "items": {
@@ -15443,10 +15926,32 @@
         "required": [
           "fire_id",
           "episode_id",
+          "analysis_window_id",
           "local_date",
+          "campaign_day_state",
           "actions"
         ],
         "title": "AgentOperationsOverview"
+      },
+      "AgentProposalReviewState": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "VALIDATED",
+          "REJECTED",
+          "INVALIDATED"
+        ],
+        "title": "AgentProposalReviewState"
+      },
+      "AgentReportReviewState": {
+        "type": "string",
+        "enum": [
+          "DRAFT",
+          "VALIDATED",
+          "REJECTED",
+          "INVALIDATED"
+        ],
+        "title": "AgentReportReviewState"
       },
       "AgentReviewResolutionRequest": {
         "properties": {
@@ -15481,6 +15986,43 @@
           "reason"
         ],
         "title": "AgentReviewResolutionRequest"
+      },
+      "AgentSituationReportReviewRequest": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "validate",
+              "reject"
+            ],
+            "title": "Action"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Expected Revision"
+          },
+          "expected_state": {
+            "type": "string",
+            "const": "DRAFT",
+            "title": "Expected State"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 10,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "action",
+          "expected_revision",
+          "expected_state",
+          "reason"
+        ],
+        "title": "AgentSituationReportReviewRequest"
       },
       "AgentSourceCandidateResponse": {
         "properties": {

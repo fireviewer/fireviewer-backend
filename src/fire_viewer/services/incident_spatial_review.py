@@ -18,8 +18,12 @@ from fire_viewer.core.time import as_utc, ensure_utc, utcnow
 from fire_viewer.db.models import (
     ActiveFireZoneRevision,
     AgentAnalysisWindow,
+    AgentFactProposal,
     AgentMediaBatch,
+    AgentMediaItem,
     AgentReviewTask,
+    AgentSituationReportFact,
+    AgentSituationReportRevision,
     AgentSpatialProposal,
     Episode,
     IncidentMapCapture,
@@ -36,6 +40,7 @@ from fire_viewer.db.models import (
 from fire_viewer.domain.enums import (
     ActiveFireZoneReviewState,
     AgentProposalReviewState,
+    AgentReportReviewState,
     AgentReviewState,
     EvidenceSpatialMode,
     IncidentMarkerReviewState,
@@ -48,11 +53,17 @@ from fire_viewer.domain.incident_spatial_schemas import (
     ActiveFireZoneReviewRequest,
     ActiveFireZoneRevisionCreateRequest,
     AdminActiveFireZoneRevision,
+    AdminAgentEvidenceReference,
+    AdminAgentFactProposal,
     AdminAgentReviewPackage,
+    AdminAgentSituationReport,
+    AdminDailyIntelligenceReview,
     AdminIncidentScene,
     AdminIncidentSpatialMarker,
     AdminIncidentSpatialReviewWorkspace,
+    AgentFactReviewRequest,
     AgentReviewResolutionRequest,
+    AgentSituationReportReviewRequest,
     IncidentGltfPickRequest,
     IncidentGltfPickResponse,
     IncidentMarkerReviewRequest,
@@ -382,6 +393,134 @@ def _zone_response(
     )
 
 
+def _fact_response(item: AgentFactProposal) -> AdminAgentFactProposal:
+    source = item.source_media_item
+    return AdminAgentFactProposal(
+        fact_id=item.fact_id,
+        category=item.category,
+        fact_key=item.fact_key,
+        as_of=as_utc(item.as_of),
+        certainty=item.certainty,
+        summary=item.summary,
+        value_number=item.value_number,
+        value_text=item.value_text,
+        value_boolean=item.value_boolean,
+        unit=item.unit,
+        conflict_group_id=item.conflict_group_id,
+        review_state=item.review_state,
+        version=item.version,
+        source=AdminAgentEvidenceReference(
+            batch_id=source.batch.batch_id,
+            input_id=source.input_id,
+            media_type=source.media_type.value,
+            media_sha256=source.media_sha256,
+            evidence_kind=item.evidence_kind,
+            evidence_id=item.evidence_id,
+        ),
+    )
+
+
+def _report_response(item: AgentSituationReportRevision) -> AdminAgentSituationReport:
+    return AdminAgentSituationReport(
+        report_revision_id=item.report_revision_id,
+        revision=item.revision,
+        title=item.title,
+        body_markdown=item.body_markdown,
+        review_state=item.review_state,
+        reviewed_by=item.reviewed_by,
+        reviewed_at=as_utc(item.reviewed_at) if item.reviewed_at else None,
+        review_reason=item.review_reason,
+        created_at=as_utc(item.created_at),
+    )
+
+
+def _daily_intelligence(
+    session: Session,
+    incident: IncidentSeries,
+    episode: Episode,
+) -> list[AdminDailyIntelligenceReview]:
+    windows = list(
+        session.scalars(
+            select(AgentAnalysisWindow)
+            .where(
+                AgentAnalysisWindow.incident_id == incident.id,
+                AgentAnalysisWindow.episode_id == episode.id,
+            )
+            .order_by(
+                AgentAnalysisWindow.local_date.desc(),
+                AgentAnalysisWindow.id.desc(),
+            )
+            .limit(500)
+        )
+    )
+    if not windows:
+        return []
+    reports = list(
+        session.scalars(
+            select(AgentSituationReportRevision)
+            .where(
+                AgentSituationReportRevision.analysis_window_id.in_(
+                    [window.id for window in windows]
+                )
+            )
+            .options(
+                selectinload(AgentSituationReportRevision.fact_links)
+                .selectinload(AgentSituationReportFact.fact)
+                .selectinload(AgentFactProposal.source_media_item)
+                .selectinload(AgentMediaItem.batch)
+            )
+            .order_by(
+                AgentSituationReportRevision.analysis_window_id.asc(),
+                AgentSituationReportRevision.revision.desc(),
+            )
+        )
+    )
+    latest_by_window: dict[int, AgentSituationReportRevision] = {}
+    for loaded_report in reports:
+        latest_by_window.setdefault(loaded_report.analysis_window_id, loaded_report)
+    result: list[AdminDailyIntelligenceReview] = []
+    for window in windows:
+        latest_report = latest_by_window.get(window.id)
+        metadata = next(
+            (
+                section
+                for section in (
+                    latest_report.sections_payload if latest_report is not None else []
+                )
+                if isinstance(section, dict) and section.get("key") == "_daily_consolidation"
+            ),
+            {},
+        )
+        facts = (
+            sorted(
+                (link.fact for link in latest_report.fact_links),
+                key=lambda item: (item.as_of, item.fact_id),
+            )
+            if latest_report is not None
+            else []
+        )
+        result.append(
+            AdminDailyIntelligenceReview(
+                analysis_id=window.analysis_id,
+                local_date=window.local_date,
+                window_state=window.state.value,
+                report=_report_response(latest_report) if latest_report is not None else None,
+                facts=[_fact_response(fact) for fact in facts],
+                operation_outcomes=dict(metadata.get("operation_outcomes") or {}),
+                spatial_counts={
+                    str(key): int(value)
+                    for key, value in dict(metadata.get("spatial_counts") or {}).items()
+                },
+                contradictions=[
+                    item
+                    for item in list(metadata.get("contradictions") or [])
+                    if isinstance(item, dict)
+                ],
+            )
+        )
+    return result
+
+
 def get_spatial_review_workspace(
     session: Session, *, fire_id: str
 ) -> AdminIncidentSpatialReviewWorkspace:
@@ -450,6 +589,7 @@ def get_spatial_review_workspace(
             for batch in batches
             if batch.review_task is not None
         ],
+        daily_intelligence=_daily_intelligence(session, incident, episode),
     )
 
 
@@ -889,6 +1029,127 @@ def review_zone_revision(
     session.commit()
     _, origin = _scene(session, incident, episode)
     return _zone_response(revision, origin=origin, revisions_by_id={revision.id: revision})
+
+
+def review_fact_proposal(
+    session: Session,
+    *,
+    fire_id: str,
+    fact_id: str,
+    payload: AgentFactReviewRequest,
+    actor: Actor,
+    trace_id: str,
+) -> AdminAgentFactProposal:
+    incident, episode = _incident_and_episode(session, fire_id)
+    fact = session.scalar(
+        select(AgentFactProposal)
+        .join(
+            AgentAnalysisWindow,
+            AgentAnalysisWindow.id == AgentFactProposal.analysis_window_id,
+        )
+        .where(
+            AgentFactProposal.fact_id == fact_id,
+            AgentAnalysisWindow.incident_id == incident.id,
+            AgentAnalysisWindow.episode_id == episode.id,
+        )
+        .options(
+            selectinload(AgentFactProposal.source_media_item).selectinload(AgentMediaItem.batch)
+        )
+    )
+    if fact is None:
+        raise NotFoundError("agent_fact_proposal", fact_id)
+    if fact.version != payload.expected_version:
+        raise ConflictError(
+            "agent_fact_version_conflict",
+            "The sourced fact changed since it was loaded.",
+        )
+    if fact.review_state != AgentProposalReviewState.PENDING:
+        raise ConflictError(
+            "agent_fact_review_state_conflict",
+            "The sourced fact has already been reviewed.",
+        )
+    fact.review_state = (
+        AgentProposalReviewState.VALIDATED
+        if payload.action == "validate"
+        else AgentProposalReviewState.REJECTED
+    )
+    fact.reviewed_by = actor.actor_id
+    fact.reviewed_at = utcnow()
+    fact.review_reason = payload.reason
+    fact.version += 1
+    record_operator_audit(
+        session,
+        actor=actor,
+        action=f"incident.agent_fact_{payload.action}",
+        target_type="agent_fact_proposal",
+        target_id=fact.fact_id,
+        reason=payload.reason,
+        trace_id=trace_id,
+        after={"review_state": fact.review_state.value, "version": fact.version},
+    )
+    session.commit()
+    return _fact_response(fact)
+
+
+def review_situation_report(
+    session: Session,
+    *,
+    fire_id: str,
+    report_revision_id: str,
+    payload: AgentSituationReportReviewRequest,
+    actor: Actor,
+    trace_id: str,
+) -> AdminAgentSituationReport:
+    incident, episode = _incident_and_episode(session, fire_id)
+    report = session.scalar(
+        select(AgentSituationReportRevision)
+        .where(
+            AgentSituationReportRevision.report_revision_id == report_revision_id,
+            AgentSituationReportRevision.incident_id == incident.id,
+            AgentSituationReportRevision.episode_id == episode.id,
+        )
+    )
+    if report is None:
+        raise NotFoundError("agent_situation_report_revision", report_revision_id)
+    if report.revision != payload.expected_revision:
+        raise ConflictError(
+            "agent_report_revision_conflict",
+            "The situation report changed since it was loaded.",
+        )
+    if report.review_state.value != payload.expected_state:
+        raise ConflictError(
+            "agent_report_review_state_conflict",
+            "The situation report has already been reviewed.",
+        )
+    report.review_state = (
+        AgentReportReviewState.VALIDATED
+        if payload.action == "validate"
+        else AgentReportReviewState.REJECTED
+    )
+    report.reviewed_by = actor.actor_id
+    report.reviewed_at = utcnow()
+    report.review_reason = payload.reason
+    record_operator_audit(
+        session,
+        actor=actor,
+        action=f"incident.agent_situation_report_{payload.action}",
+        target_type="agent_situation_report_revision",
+        target_id=report.report_revision_id,
+        reason=payload.reason,
+        trace_id=trace_id,
+        after={
+            "review_state": report.review_state.value,
+            "revision": report.revision,
+            "published": False,
+        },
+    )
+    if payload.action == "validate":
+        refresh_campaign_day_publication_state(
+            session,
+            analysis_window_id=report.analysis_window_id,
+        )
+    session.commit()
+    return _report_response(report)
 
 
 def resolve_agent_review(

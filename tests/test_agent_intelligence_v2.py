@@ -608,6 +608,69 @@ def test_campaign_creates_one_daily_consolidation_after_all_required_operations(
     assert zone is not None
     assert zone.analysis_window_id == window.id
 
+    workspace = client.get("/api/v1/admin/incidents/FR-26-00001/spatial-review")
+    assert workspace.status_code == 200, workspace.text
+    daily = workspace.json()["daily_intelligence"]
+    assert len(daily) == 1
+    assert daily[0]["analysis_id"] == window.analysis_id
+    assert daily[0]["report"]["report_revision_id"] == report.report_revision_id
+    assert daily[0]["operation_outcomes"]["user_media"]["outcome"] == "partial_failure"
+    assert len(daily[0]["facts"]) == 1
+    fact_payload = daily[0]["facts"][0]
+    assert fact_payload["source"]["batch_id"] == dispatch.batch.batch_id
+    reviewed_fact = client.post(
+        (
+            "/api/v1/admin/incidents/FR-26-00001/agent-facts/"
+            f"{fact_payload['fact_id']}/review"
+        ),
+        json={
+            "action": "validate",
+            "expected_version": fact_payload["version"],
+            "reason": "Fait sourcé contrôlé dans la revue existante.",
+        },
+    )
+    assert reviewed_fact.status_code == 200, reviewed_fact.text
+    assert reviewed_fact.json()["review_state"] == "VALIDATED"
+    duplicate_fact_review = client.post(
+        (
+            "/api/v1/admin/incidents/FR-26-00001/agent-facts/"
+            f"{fact_payload['fact_id']}/review"
+        ),
+        json={
+            "action": "validate",
+            "expected_version": fact_payload["version"],
+            "reason": "Deuxième décision volontairement refusée par le verrou de version.",
+        },
+    )
+    assert duplicate_fact_review.status_code == 409, duplicate_fact_review.text
+    reviewed_report = client.post(
+        (
+            "/api/v1/admin/incidents/FR-26-00001/agent-situation-reports/"
+            f"{report.report_revision_id}/review"
+        ),
+        json={
+            "action": "validate",
+            "expected_revision": report.revision,
+            "expected_state": "DRAFT",
+            "reason": "Rapport quotidien contrôlé après les inférences disponibles.",
+        },
+    )
+    assert reviewed_report.status_code == 200, reviewed_report.text
+    assert reviewed_report.json()["review_state"] == "VALIDATED"
+    duplicate_report_review = client.post(
+        (
+            "/api/v1/admin/incidents/FR-26-00001/agent-situation-reports/"
+            f"{report.report_revision_id}/review"
+        ),
+        json={
+            "action": "reject",
+            "expected_revision": report.revision,
+            "expected_state": "DRAFT",
+            "reason": "Deuxième décision volontairement refusée après la validation humaine.",
+        },
+    )
+    assert duplicate_report_review.status_code == 409, duplicate_report_review.text
+
     from fire_viewer.services.agent_validation_campaigns import (
         refresh_campaign_day_review_state,
     )
@@ -717,3 +780,24 @@ def test_campaign_reviews_failed_operation_without_content_threshold(
     assert report.sections_payload[0]["fact_ids"] == []
     assert report.sections_payload[0]["spatial_proposal_ids"] == []
     assert session.scalar(select(func.count()).select_from(ActiveFireZoneRevision)) == 0
+    workspace = client.get("/api/v1/admin/incidents/FR-26-00001/spatial-review")
+    assert workspace.status_code == 200, workspace.text
+    daily = workspace.json()["daily_intelligence"]
+    assert daily[0]["facts"] == []
+    assert daily[0]["spatial_counts"] == {}
+    reviewed_report = client.post(
+        (
+            "/api/v1/admin/incidents/FR-26-00001/agent-situation-reports/"
+            f"{report.report_revision_id}/review"
+        ),
+        json={
+            "action": "validate",
+            "expected_revision": report.revision,
+            "expected_state": "DRAFT",
+            "reason": "Abstention et échec explicitement contrôlés sans inventer de contenu.",
+        },
+    )
+    assert reviewed_report.status_code == 200, reviewed_report.text
+    assert reviewed_report.json()["review_state"] == "VALIDATED"
+    session.refresh(campaign_day)
+    assert campaign_day.state == AgentValidationCampaignDayState.REVIEW

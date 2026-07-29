@@ -5,7 +5,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from fire_viewer.domain.enums import ActiveFireZoneReviewState
+from fire_viewer.domain.enums import (
+    ActiveFireZoneReviewState,
+    AgentProposalReviewState,
+    AgentReportReviewState,
+)
 
 
 class StrictSpatialReviewModel(BaseModel):
@@ -75,6 +79,55 @@ class AdminAgentReviewPackage(StrictSpatialReviewModel):
     result: dict[str, Any] | None = None
 
 
+class AdminAgentEvidenceReference(StrictSpatialReviewModel):
+    batch_id: str
+    input_id: str
+    media_type: str
+    media_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    evidence_kind: str
+    evidence_id: str
+
+
+class AdminAgentFactProposal(StrictSpatialReviewModel):
+    fact_id: str
+    category: str
+    fact_key: str
+    as_of: datetime
+    certainty: str
+    summary: str
+    value_number: float | None = None
+    value_text: str | None = None
+    value_boolean: bool | None = None
+    unit: str | None = None
+    conflict_group_id: str | None = None
+    review_state: AgentProposalReviewState
+    version: int = Field(ge=1)
+    source: AdminAgentEvidenceReference
+
+
+class AdminAgentSituationReport(StrictSpatialReviewModel):
+    report_revision_id: str
+    revision: int = Field(ge=1)
+    title: str
+    body_markdown: str
+    review_state: AgentReportReviewState
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+    review_reason: str | None = None
+    created_at: datetime
+
+
+class AdminDailyIntelligenceReview(StrictSpatialReviewModel):
+    analysis_id: str
+    local_date: date
+    window_state: str
+    report: AdminAgentSituationReport | None = None
+    facts: list[AdminAgentFactProposal] = Field(default_factory=list, max_length=2_000)
+    operation_outcomes: dict[str, Any] = Field(default_factory=dict)
+    spatial_counts: dict[str, int] = Field(default_factory=dict)
+    contradictions: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class AdminIncidentMapCapture(StrictSpatialReviewModel):
     capture_id: str
     zone_revision_id: str
@@ -93,6 +146,9 @@ class AdminIncidentSpatialReviewWorkspace(StrictSpatialReviewModel):
     zone_revisions: list[AdminActiveFireZoneRevision] = Field(default_factory=list, max_length=500)
     map_gallery: list[AdminIncidentMapCapture] = Field(default_factory=list, max_length=1_000)
     agent_reviews: list[AdminAgentReviewPackage] = Field(default_factory=list, max_length=200)
+    daily_intelligence: list[AdminDailyIntelligenceReview] = Field(
+        default_factory=list, max_length=500
+    )
 
 
 class IncidentMapCaptureUploadGrantRequest(StrictSpatialReviewModel):
@@ -147,6 +203,19 @@ class ActiveFireZoneReviewRequest(StrictSpatialReviewModel):
 class AgentReviewResolutionRequest(StrictSpatialReviewModel):
     action: Literal["approve", "reject"]
     expected_state: Literal["PENDING", "IN_REVIEW"]
+    reason: str = Field(min_length=10, max_length=500)
+
+
+class AgentFactReviewRequest(StrictSpatialReviewModel):
+    action: Literal["validate", "reject"]
+    expected_version: int = Field(ge=1)
+    reason: str = Field(min_length=10, max_length=500)
+
+
+class AgentSituationReportReviewRequest(StrictSpatialReviewModel):
+    action: Literal["validate", "reject"]
+    expected_revision: int = Field(ge=1)
+    expected_state: Literal["DRAFT"]
     reason: str = Field(min_length=10, max_length=500)
 
 

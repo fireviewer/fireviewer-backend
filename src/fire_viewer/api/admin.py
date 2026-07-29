@@ -46,11 +46,15 @@ from fire_viewer.domain.incident_spatial_schemas import (
     ActiveFireZoneReviewRequest,
     ActiveFireZoneRevisionCreateRequest,
     AdminActiveFireZoneRevision,
+    AdminAgentFactProposal,
     AdminAgentReviewPackage,
+    AdminAgentSituationReport,
     AdminIncidentMapCapture,
     AdminIncidentSpatialMarker,
     AdminIncidentSpatialReviewWorkspace,
+    AgentFactReviewRequest,
     AgentReviewResolutionRequest,
+    AgentSituationReportReviewRequest,
     IncidentGltfPickRequest,
     IncidentGltfPickResponse,
     IncidentMapCaptureFinalizeRequest,
@@ -173,7 +177,9 @@ from fire_viewer.services.incident_spatial_review import (
     merge_zone_revisions,
     project_gltf_pick,
     resolve_agent_review,
+    review_fact_proposal,
     review_marker,
+    review_situation_report,
     review_zone_revision,
 )
 from fire_viewer.services.public_incident_view import list_public_reports, review_public_report
@@ -1033,6 +1039,52 @@ def resolve_incident_agent_review(
         session,
         fire_id=fire_id,
         review_id=review_id,
+        payload=payload,
+        actor=actor,
+        trace_id=trace_id,
+    )
+
+
+@router.post(
+    "/incidents/{fire_id}/agent-facts/{fact_id}/review",
+    response_model=AdminAgentFactProposal,
+)
+def review_incident_agent_fact(
+    fire_id: str,
+    fact_id: str,
+    payload: AgentFactReviewRequest,
+    actor: ActorDep,
+    session: SessionDep,
+    trace_id: TraceIdDep,
+) -> AdminAgentFactProposal:
+    _require_admin(actor)
+    return review_fact_proposal(
+        session,
+        fire_id=fire_id,
+        fact_id=fact_id,
+        payload=payload,
+        actor=actor,
+        trace_id=trace_id,
+    )
+
+
+@router.post(
+    "/incidents/{fire_id}/agent-situation-reports/{report_revision_id}/review",
+    response_model=AdminAgentSituationReport,
+)
+def review_incident_agent_situation_report(
+    fire_id: str,
+    report_revision_id: str,
+    payload: AgentSituationReportReviewRequest,
+    actor: ActorDep,
+    session: SessionDep,
+    trace_id: TraceIdDep,
+) -> AdminAgentSituationReport:
+    _require_admin(actor)
+    return review_situation_report(
+        session,
+        fire_id=fire_id,
+        report_revision_id=report_revision_id,
         payload=payload,
         actor=actor,
         trace_id=trace_id,

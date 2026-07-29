@@ -195,9 +195,22 @@ make viewer-contract-schema
 
 La revue Admin ne génère pas un nouveau modèle 3D. Elle charge le `ModelAsset` GLB courant comme
 socle immuable et superpose des calques privés : marqueurs WGS84, révisions `MultiPolygon` de la zone
-active et paquet de résultat agentique. Dessiner, reprendre ou fusionner crée uniquement une nouvelle
-révision du calque de zone. Aucun de ces actes ne crée de `ModelAsset`, ne remplace le GLB courant et
-ne publie la révision ; l'approbation humaine la place seulement à `READY_FOR_PUBLICATION`.
+active et résultats agentiques. Les contributions utilisateur conservent un cycle distinct :
+consentement, stockage privé, modération, retrait et éventuelle publication du média. Le pipeline IA
+peut analyser un média privé éligible, mais sa sortie ne remplace ni la contribution ni sa décision
+de publication.
+
+Une fois toutes les opérations prévues pour la fenêtre d'analyse arrivées à une issue terminale
+(succès, échec partiel, échec, annulation ou absence déclarée), leurs sorties sont consolidées dans
+la revue spatiale existante. Cette barrière est contractuelle et ne dépend jamais du nombre de
+fichiers, de faits ou de géométries produits. Une fenêtre pauvre ou vide doit donc présenter son
+abstention ou ses limites à l'opérateur, sans donnée inventée.
+
+La revue post-inférence expose les faits avec leur preuve conservée, le rapport privé, les
+contradictions, les points et les propositions de périmètre. Dessiner, reprendre ou fusionner crée
+uniquement une nouvelle révision du calque de zone. Aucun de ces actes ne crée de `ModelAsset`, ne
+remplace le GLB courant ou ne publie automatiquement un contenu ; les validations du rapport, du
+calque et des médias restent séparées.
 
 ## Sauvegarde SQLite
 
