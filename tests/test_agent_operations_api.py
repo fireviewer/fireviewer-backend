@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, date
+from datetime import UTC, date, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -348,3 +348,189 @@ def test_campaign_makes_historical_windows_runnable_without_publication_gate(
         )
         is campaign_days[2]
     )
+
+
+def test_admin_runs_historical_fontainebleau_and_trevillach_without_publication_gate(
+    client,
+    settings,
+    seed_incident,
+    session,
+    tmp_path,
+) -> None:
+    """Historical windows are normal operations, not a separate replay mode.
+
+    This exercises the same admin overview and operation routes used by the
+    product.  Fontainebleau and Trevillach may both run their earliest
+    historical window at once; after a worker has moved that window to review,
+    the following historical date is immediately runnable without publication.
+    """
+    fontainebleau, fontainebleau_episode = seed_incident(
+        fire_id="FR-77-00001",
+        sequence=1,
+        lon=2.72,
+        lat=48.40,
+        canonical_name="Forêt de Fontainebleau",
+        status=IncidentStatus.ACTIVE_CONFIRMED,
+    )
+    trevillach, trevillach_episode = seed_incident(
+        fire_id="FR-66-00001",
+        sequence=2,
+        lon=2.68,
+        lat=42.71,
+        canonical_name="Trévillach",
+        status=IncidentStatus.ACTIVE_CONFIRMED,
+    )
+
+    windows_by_fire: dict[str, list[AgentAnalysisWindow]] = {
+        fontainebleau.fire_id: [
+            ensure_daily_analysis_window(
+                session,
+                incident=fontainebleau,
+                episode=fontainebleau_episode,
+                local_date=date(2026, 7, 12) + timedelta(days=offset),
+            )
+            for offset in range(4)
+        ],
+        trevillach.fire_id: [
+            ensure_daily_analysis_window(
+                session,
+                incident=trevillach,
+                episode=trevillach_episode,
+                local_date=date(2026, 7, 4) + timedelta(days=offset),
+            )
+            for offset in range(8)
+        ],
+    }
+    # The route opens its own database session.  Commit the fixture setup
+    # before exercising the real HTTP contract (SQLite has a single writer).
+    session.commit()
+    media_hashes_by_window_id: dict[int, str] = {}
+    for fire_id, episode_id in (
+        (fontainebleau.fire_id, fontainebleau_episode.episode_id),
+        (trevillach.fire_id, trevillach_episode.episode_id),
+    ):
+        for index, window in enumerate(windows_by_fire[fire_id][:2], start=1):
+            batch = _v2_payload(
+                fire_id=fire_id,
+                episode_id=episode_id,
+                batch_type="user_media",
+            )
+            batch["batch_id"] = f"historical-{fire_id.lower()}-{index:02d}"
+            analysis_window = batch["analysis_window"]
+            assert isinstance(analysis_window, dict)
+            analysis_window.update(
+                {
+                    "analysis_id": window.analysis_id,
+                    "window_start_at": window.window_start_at.isoformat(),
+                    "window_end_at": window.window_end_at.isoformat(),
+                    "local_date": window.local_date.isoformat(),
+                }
+            )
+            items = batch["items"]
+            assert isinstance(items, list) and len(items) == 1
+            item = items[0]
+            assert isinstance(item, dict)
+            media_sha256 = f"{1_000 + len(media_hashes_by_window_id):064x}"
+            item.update(
+                {
+                    "input_id": f"{fire_id.lower()}-ground-{index:02d}",
+                    "media_sha256": media_sha256,
+                    "working_file_url": (
+                        f"https://localhost/private/{fire_id.lower()}-{index:02d}.jpg?signature=test"
+                    ),
+                }
+            )
+            created = client.post(
+                "/api/v2/admin/agent-batches",
+                headers={"Idempotency-Key": f"historical-batch-{fire_id}-{index:02d}"},
+                json=batch,
+            )
+            assert created.status_code == 201, created.text
+            media_hashes_by_window_id[window.id] = media_sha256
+    days: list[dict[str, object]] = []
+    ordered_windows = [
+        (fontainebleau.fire_id, window)
+        for window in windows_by_fire[fontainebleau.fire_id]
+    ]
+    ordered_windows.extend(
+        (trevillach.fire_id, window) for window in windows_by_fire[trevillach.fire_id]
+    )
+    ordered_windows.sort(key=lambda item: item[1].local_date)
+    for ordinal, (fire_id, window) in enumerate(ordered_windows, start=1):
+        cutoff_at = window.window_end_at
+        if cutoff_at.tzinfo is None:
+            cutoff_at = cutoff_at.replace(tzinfo=UTC)
+        day: dict[str, object] = {
+            "ordinal": ordinal,
+            "fire_id": fire_id,
+            "local_date": window.local_date.isoformat(),
+            "cutoff_at": cutoff_at.isoformat(),
+            "allowed_media_sha256": [
+                media_hashes_by_window_id.get(window.id, f"{ordinal:x}".rjust(64, "0"))
+            ],
+            "expected_public_sources": [
+                f"https://example.test/{fire_id}/{window.local_date.isoformat()}"
+            ],
+            "required_operations": ["user_media"],
+            "declared_absences": ["source_research", "satellite_media"],
+        }
+        day["manifest_sha256"] = _canonical_sha256(day, "manifest_sha256")
+        days.append(day)
+    payload: dict[str, object] = {
+        "schema_version": "2.0",
+        "campaign_id": "fontainebleau-trevillach-historical-admin-routes",
+        "days": days,
+    }
+    payload["manifest_sha256"] = _canonical_sha256(payload, "manifest_sha256")
+    manifest_path = tmp_path / "fontainebleau-trevillach-historical.json"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    create_campaign_from_manifest(
+        session,
+        manifest_path=manifest_path,
+        created_by="test-suite",
+    )
+
+    campaign = active_campaign(session)
+    assert campaign is not None
+    campaign_days = sorted(campaign.days, key=lambda item: item.ordinal)
+    assert len(campaign_days) == 12
+    assert all(item.state == AgentValidationCampaignDayState.READY for item in campaign_days)
+
+    settings.agent_dispatch_enabled = True
+    for fire_id, expected_window in (
+        (fontainebleau.fire_id, windows_by_fire[fontainebleau.fire_id][0]),
+        (trevillach.fire_id, windows_by_fire[trevillach.fire_id][0]),
+    ):
+        overview = client.get(f"/api/v2/admin/agent-batches/incidents/{fire_id}/operations")
+        assert overview.status_code == 200, overview.text
+        assert overview.json()["analysis_window_id"] == expected_window.analysis_id
+        launched = client.post(
+            f"/api/v2/admin/agent-batches/incidents/{fire_id}/operations/user_media/run",
+            json={"expected_analysis_window_id": expected_window.analysis_id},
+        )
+        assert launched.status_code == 200, launched.text
+        assert launched.json()["analysis_window_id"] == expected_window.analysis_id
+
+    # This is the normal post-inference review state.  No campaign date is
+    # published here: the next historical window must nevertheless be usable.
+    for campaign_day in campaign_days:
+        if campaign_day.analysis_window_id in {
+            windows_by_fire[fontainebleau.fire_id][0].id,
+            windows_by_fire[trevillach.fire_id][0].id,
+        }:
+            campaign_day.state = AgentValidationCampaignDayState.REVIEW
+    session.commit()
+
+    for fire_id, expected_window in (
+        (fontainebleau.fire_id, windows_by_fire[fontainebleau.fire_id][1]),
+        (trevillach.fire_id, windows_by_fire[trevillach.fire_id][1]),
+    ):
+        overview = client.get(f"/api/v2/admin/agent-batches/incidents/{fire_id}/operations")
+        assert overview.status_code == 200, overview.text
+        assert overview.json()["analysis_window_id"] == expected_window.analysis_id
+        launched = client.post(
+            f"/api/v2/admin/agent-batches/incidents/{fire_id}/operations/user_media/run",
+            json={"expected_analysis_window_id": expected_window.analysis_id},
+        )
+        assert launched.status_code == 200, launched.text
+        assert launched.json()["analysis_window_id"] == expected_window.analysis_id
