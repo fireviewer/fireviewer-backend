@@ -410,6 +410,7 @@ def get_public_incident_view(
             observations=[],
             evidence_projections=[],
             active_fire_zone=None,
+            active_fire_zones=[],
             daily_intelligence=[],
             map_gallery=[],
             gallery=[],
@@ -653,20 +654,26 @@ def get_public_incident_view(
     published_window_ids = select(AgentValidationCampaignDay.analysis_window_id).where(
         AgentValidationCampaignDay.state == AgentValidationCampaignDayState.PUBLISHED
     )
-    active_zone = session.execute(
-        select(ActiveFireZoneRevision)
-        .where(
-            ActiveFireZoneRevision.incident_id == incident.id,
-            ActiveFireZoneRevision.episode_id == current.id,
-            ActiveFireZoneRevision.review_state == ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
-            or_(
-                ActiveFireZoneRevision.analysis_window_id.is_(None),
-                ActiveFireZoneRevision.analysis_window_id.in_(published_window_ids),
-            ),
+    active_zones = list(
+        session.scalars(
+            select(ActiveFireZoneRevision)
+            .where(
+                ActiveFireZoneRevision.incident_id == incident.id,
+                ActiveFireZoneRevision.episode_id == current.id,
+                ActiveFireZoneRevision.review_state == ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
+                or_(
+                    ActiveFireZoneRevision.analysis_window_id.is_(None),
+                    ActiveFireZoneRevision.analysis_window_id.in_(published_window_ids),
+                ),
+            )
+            .order_by(
+                ActiveFireZoneRevision.valid_at.asc(),
+                ActiveFireZoneRevision.revision.asc(),
+            )
+            .limit(500)
         )
-        .order_by(ActiveFireZoneRevision.revision.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+    )
+    active_zone = active_zones[-1] if active_zones else None
     map_captures = list(
         session.scalars(
             select(IncidentMapCapture)
@@ -744,11 +751,30 @@ def get_public_incident_view(
                 zone_revision_id=active_zone.zone_revision_id,
                 revision=active_zone.revision,
                 valid_at=as_utc(active_zone.valid_at),
+                analysis_id=(
+                    active_zone.analysis_window.analysis_id
+                    if active_zone.analysis_window is not None
+                    else None
+                ),
                 geometry_geojson=active_zone.geometry_geojson,
             )
             if active_zone is not None
             else None
         ),
+        active_fire_zones=[
+            PublicActiveFireZone(
+                zone_revision_id=zone.zone_revision_id,
+                revision=zone.revision,
+                valid_at=as_utc(zone.valid_at),
+                analysis_id=(
+                    zone.analysis_window.analysis_id
+                    if zone.analysis_window is not None
+                    else None
+                ),
+                geometry_geojson=zone.geometry_geojson,
+            )
+            for zone in active_zones
+        ],
         daily_intelligence=daily_intelligence,
         map_gallery=[
             PublicIncidentMapCapture(

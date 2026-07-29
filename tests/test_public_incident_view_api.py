@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import text
 
 from fire_viewer.core.security import Actor
@@ -8,8 +10,15 @@ from fire_viewer.db.models import (
     IncidentOperationalInformation,
     Observation,
     Source,
+    ActiveFireZoneRevision,
 )
-from fire_viewer.domain.enums import MatchDecision, SourceTrust, SourceType, VerificationState
+from fire_viewer.domain.enums import (
+    ActiveFireZoneReviewState,
+    MatchDecision,
+    SourceTrust,
+    SourceType,
+    VerificationState,
+)
 from fire_viewer.domain.schemas import (
     AdminIncidentGalleryCreateRequest,
     AdminIncidentGalleryReviewRequest,
@@ -93,6 +102,66 @@ def test_public_view_filters_sensitive_observation_fields_and_supports_etag(
         ).status_code
         == 304
     )
+
+
+def test_public_view_uses_the_latest_historical_zone_by_effective_date(
+    client, seed_incident, session
+) -> None:
+    incident, episode = seed_incident(
+        fire_id="FR-83-00610", sequence=610, lon=6.04, lat=43.31
+    )
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [[[6.03, 43.30], [6.05, 43.30], [6.05, 43.32], [6.03, 43.30]]],
+    }
+    session.add_all(
+        [
+            ActiveFireZoneRevision(
+                zone_revision_id="azr-history-earlier",
+                incident_id=incident.id,
+                episode_id=episode.id,
+                revision=12,
+                valid_at=datetime(2026, 7, 12, 23, 59, tzinfo=UTC),
+                geometry_geojson=geometry,
+                geometry_origin="HUMAN_AUTHORED",
+                supporting_marker_ids=[],
+                source_revision_ids=[],
+                review_state=ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
+                created_by="admin-test",
+                reviewed_by="admin-test",
+                reviewed_at=datetime(2026, 7, 13, tzinfo=UTC),
+                review_reason="Calque historique contrôlé avant publication.",
+                reason="Contour du 12 juillet conservé pour vérifier le tri temporel.",
+            ),
+            ActiveFireZoneRevision(
+                zone_revision_id="azr-history-later-revision",
+                incident_id=incident.id,
+                episode_id=episode.id,
+                revision=13,
+                valid_at=datetime(2026, 7, 11, 23, 59, tzinfo=UTC),
+                geometry_geojson=geometry,
+                geometry_origin="HUMAN_AUTHORED",
+                supporting_marker_ids=[],
+                source_revision_ids=[],
+                review_state=ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
+                created_by="admin-test",
+                reviewed_by="admin-test",
+                reviewed_at=datetime(2026, 7, 13, tzinfo=UTC),
+                review_reason="Calque historique contrôlé avant publication.",
+                reason="Contour du 11 juillet saisi après celui du 12 juillet.",
+            ),
+        ]
+    )
+    session.commit()
+
+    response = client.get(f"/api/v1/incident/{incident.fire_id}/public-view")
+
+    assert response.status_code == 200
+    assert response.json()["active_fire_zone"]["zone_revision_id"] == "azr-history-earlier"
+    assert [item["zone_revision_id"] for item in response.json()["active_fire_zones"]] == [
+        "azr-history-later-revision",
+        "azr-history-earlier",
+    ]
     assert (
         client.get(f"/api/v1/incident/{incident.fire_id}/public-view/export.json").json()["fire_id"]
         == incident.fire_id

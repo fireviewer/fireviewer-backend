@@ -425,6 +425,7 @@ class PublicActiveFireZone(StrictModel):
     zone_revision_id: str = Field(min_length=1, max_length=96)
     revision: int = Field(ge=1)
     valid_at: datetime
+    analysis_id: str | None = Field(default=None, min_length=1, max_length=128)
     geometry_geojson: dict[str, object]
 
 
@@ -519,6 +520,7 @@ class PublicIncidentView(StrictModel):
     observations: list[PublicObservationSummary] = Field(default_factory=list)
     evidence_projections: list[PublicEvidenceProjection] = Field(default_factory=list)
     active_fire_zone: PublicActiveFireZone | None = None
+    active_fire_zones: list[PublicActiveFireZone] = Field(default_factory=list, max_length=500)
     daily_intelligence: list[PublicDailyIntelligence] = Field(default_factory=list, max_length=500)
     map_gallery: list[PublicIncidentMapCapture] = Field(default_factory=list, max_length=1_000)
     gallery: list[PublicIncidentGalleryItem] = Field(default_factory=list, max_length=120)
