@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from fire_viewer.core.config import Settings
 from fire_viewer.db.engine import normalize_database_url
+from fire_viewer.main import trusted_hosts_for_runtime
 from fire_viewer.storage.object_store import (
     LocalObjectStore,
     ObjectStorageError,
@@ -64,6 +65,31 @@ def test_cron_secret_accepts_vercel_native_variable(monkeypatch: pytest.MonkeyPa
     settings = Settings(_env_file=None)
     assert settings.cron_secret is not None
     assert settings.cron_secret.get_secret_value() == "x" * 40
+
+
+def test_vercel_runtime_host_is_added_to_the_exact_trusted_host_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VERCEL_URL", "fireviewer-api-abc123-charli-dev420s-projects.vercel.app")
+
+    allowed_hosts = trusted_hosts_for_runtime(
+        Settings(_env_file=None, trusted_hosts=["fireviewer-api.vercel.app"])
+    )
+
+    assert allowed_hosts == [
+        "fireviewer-api-abc123-charli-dev420s-projects.vercel.app",
+        "fireviewer-api.vercel.app",
+    ]
+
+
+def test_untrusted_runtime_host_is_not_added(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VERCEL_URL", "unexpected.example")
+
+    allowed_hosts = trusted_hosts_for_runtime(
+        Settings(_env_file=None, trusted_hosts=["fireviewer-api.vercel.app"])
+    )
+
+    assert allowed_hosts == ["fireviewer-api.vercel.app"]
 
 
 def test_direct_pod_dispatch_requires_a_long_token_and_https() -> None:

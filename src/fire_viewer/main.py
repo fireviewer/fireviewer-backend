@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -28,6 +30,27 @@ from fire_viewer.core.security import JwtVerifier
 from fire_viewer.db.engine import create_db_engine, create_session_factory
 
 BUILD_INFO = Info("fire_viewer_build", "Fire-Viewer API build metadata")
+
+_VERCEL_DEPLOYMENT_HOST = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.vercel\.app$"
+)
+
+
+def trusted_hosts_for_runtime(settings: Settings) -> list[str]:
+    """Allow the exact Vercel deployment host used by Vercel Cron.
+
+    Vercel invokes cron routes through the immutable deployment hostname exposed
+    as ``VERCEL_URL``. That hostname changes per production deployment, so a
+    static allow-list alone rejects valid internal cron traffic before it reaches
+    the authenticated cron route. Only a syntactically valid ``*.vercel.app``
+    hostname is added; no wildcard or arbitrary runtime host is trusted.
+    """
+
+    allowed_hosts = {host.strip().casefold() for host in settings.trusted_hosts if host.strip()}
+    vercel_host = os.environ.get("VERCEL_URL", "").strip().casefold()
+    if _VERCEL_DEPLOYMENT_HOST.fullmatch(vercel_host):
+        allowed_hosts.add(vercel_host)
+    return sorted(allowed_hosts)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -58,7 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.session_factory = session_factory
     app.state.jwt_verifier = JwtVerifier(settings)
 
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts_for_runtime(settings))
     if settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,
