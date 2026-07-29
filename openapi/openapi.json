@@ -15810,6 +15810,56 @@
         ],
         "title": "AgentOperationStatus"
       },
+      "AgentOperationWindow": {
+        "properties": {
+          "analysis_window_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "title": "Analysis Window Id"
+          },
+          "local_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Local Date"
+          },
+          "campaign_day_state": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "locked",
+                  "ready",
+                  "running",
+                  "review",
+                  "published",
+                  "failed"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campaign Day State"
+          },
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/AgentOperationStatus"
+            },
+            "type": "array",
+            "title": "Actions"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "analysis_window_id",
+          "local_date",
+          "campaign_day_state",
+          "actions"
+        ],
+        "title": "AgentOperationWindow",
+        "description": "One manifest-bound operational window exposed to the admin client."
+      },
       "AgentOperationsOverview": {
         "properties": {
           "fire_id": {
@@ -15857,6 +15907,13 @@
             },
             "type": "array",
             "title": "Actions"
+          },
+          "available_windows": {
+            "items": {
+              "$ref": "#/components/schemas/AgentOperationWindow"
+            },
+            "type": "array",
+            "title": "Available Windows"
           }
         },
         "additionalProperties": false,
