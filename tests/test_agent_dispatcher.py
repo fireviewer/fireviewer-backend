@@ -57,6 +57,14 @@ class AmbiguousSubmitRunPod(FakeRunPod):
         raise httpx.ReadTimeout("response lost", request=request)
 
 
+class MissingRemoteRunPod(FakeRunPod):
+    def status(self, _remote_job_id: str) -> dict[str, Any]:
+        self.status_reads += 1
+        request = httpx.Request("GET", "https://pod.example/v1/jobs/missing")
+        response = httpx.Response(404, request=request)
+        raise httpx.HTTPStatusError("missing remote job", request=request, response=response)
+
+
 def _worker_output(*, batch_id: str = "agent-batch-0001", revision: str = "rev-ok"):
     now = datetime.now(UTC)
     return {
@@ -324,6 +332,35 @@ def test_invalid_model_revision_is_dead_lettered(client, session, app, settings)
     assert dispatch.state == AgentDispatchState.DEAD_LETTER
     assert dispatch.last_error_code == "agent_worker_output_invalid"
     assert session.scalar(select(func.count()).select_from(AgentReviewTask)) == 0
+
+
+def test_missing_remote_job_is_dead_lettered_without_blocking_the_queue(
+    client, session, app, settings
+) -> None:
+    _enqueue(client)
+    _make_due(session)
+    runpod = MissingRemoteRunPod()
+
+    assert run_dispatcher_once(
+        app.state.session_factory,
+        worker_id="dispatcher-test",
+        settings=settings,
+        client=runpod,
+    )
+    _make_due(session)
+    assert run_dispatcher_once(
+        app.state.session_factory,
+        worker_id="dispatcher-test",
+        settings=settings,
+        client=runpod,
+    )
+
+    session.expire_all()
+    dispatch = session.scalar(select(AgentDispatch))
+    assert dispatch is not None
+    assert dispatch.state == AgentDispatchState.DEAD_LETTER
+    assert dispatch.last_error_code == "agent_remote_not_found"
+    assert runpod.status_reads == 1
 
 
 def test_consent_withdrawal_cancels_queued_dispatch_locally(client, session, app, settings) -> None:

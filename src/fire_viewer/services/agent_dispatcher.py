@@ -812,6 +812,30 @@ def _poll(
         remote_status = raw_status.upper()
         if remote_status not in ACTIVE_REMOTE_STATES | TERMINAL_REMOTE_STATES:
             raise ValueError(f"Unknown RunPod job status: {remote_status}")
+    except httpx.HTTPStatusError as exc:
+        # Persistent pods do not retain job state after a replacement or a
+        # restart. A 404 is therefore terminal for this immutable submission:
+        # retrying the same status request indefinitely blocks the global queue
+        # without a possible recovery path.
+        if exc.response.status_code == 404:
+            _dead_letter(
+                session,
+                dispatch,
+                worker_id=worker_id,
+                failure_class="remote_failure",
+                error_code="agent_remote_not_found",
+                detail="The configured RunPod worker no longer has this submitted job.",
+            )
+            return
+        dispatch.poll_count += 1
+        _schedule_poll_retry(
+            session,
+            dispatch,
+            settings=settings,
+            error_code="agent_status_unavailable",
+            detail=f"RunPod status could not be read: {exc}",
+        )
+        return
     except (httpx.HTTPError, ValueError) as exc:
         dispatch.poll_count += 1
         _schedule_poll_retry(
