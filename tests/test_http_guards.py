@@ -17,3 +17,23 @@ def test_canonical_incident_routes_are_in_openapi_and_plural_alias_is_hidden(cli
     assert "/api/v1/incident/{fire_id}" in paths
     assert "/api/v1/incident/{fire_id}/manifest" in paths
     assert "/api/v1/incidents/detect" not in paths
+
+
+def test_contribution_dossier_cannot_duplicate_agent_review_contract(client) -> None:
+    paths = client.get("/openapi.json").json()["paths"]
+
+    # Contribution moderation and editorial gallery decisions remain separate.
+    assert "/api/v2/admin/public-contributions/{contribution_id}" in paths
+    assert "/api/v2/admin/public-contributions/{contribution_id}/gallery-proposal" in paths
+
+    # IA decisions belong exclusively to the existing incident spatial review.
+    assert "/api/v1/admin/incidents/{fire_id}/spatial-markers/{marker_id}/review" in paths
+    assert "/api/v1/admin/incidents/{fire_id}/agent-facts/{fact_id}/review" in paths
+    assert (
+        "/api/v1/admin/incidents/{fire_id}/agent-situation-reports/"
+        "{report_revision_id}/review"
+    ) in paths
+    assert (
+        "/api/v2/admin/public-contributions/{contribution_id}/proposals/"
+        "{kind}/{proposal_id}/review"
+    ) not in paths

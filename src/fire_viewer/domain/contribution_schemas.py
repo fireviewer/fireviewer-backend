@@ -127,7 +127,7 @@ class AdminPublicContribution(PublicContributionStatus):
 
 
 class AdminContributionProposal(StrictContributionModel):
-    """Safe, decision-oriented projection of one private agent proposal."""
+    """Read-only trace of an IA result linked to a private contribution."""
 
     proposal_id: str = Field(min_length=1, max_length=128)
     kind: Literal["fact", "spatial", "report"]
@@ -160,12 +160,6 @@ class AdminPublicContributionDetail(AdminPublicContribution):
 class AdminPublicContributionDetailEnvelope(StrictContributionModel):
     contribution: AdminPublicContributionDetail
     trace_id: str
-
-
-class AdminContributionProposalReviewRequest(StrictContributionModel):
-    action: Literal["validate", "reject", "invalidate"]
-    reason: str = Field(min_length=10, max_length=500)
-    expected_version: int = Field(ge=1)
 
 
 class AdminContributionGalleryProposalRequest(StrictContributionModel):

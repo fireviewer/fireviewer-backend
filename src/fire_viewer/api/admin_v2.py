@@ -20,7 +20,6 @@ from fire_viewer.db.models import IncidentSeries, ModelAsset, SpatialPackage, Sp
 from fire_viewer.domain.contribution_schemas import (
     AdminContributionGalleryProposalRequest,
     AdminContributionGalleryState,
-    AdminContributionProposalReviewRequest,
     AdminPublicContributionDetailEnvelope,
 )
 from fire_viewer.domain.errors import ConflictError, NotFoundError
@@ -41,7 +40,6 @@ from fire_viewer.domain.schemas import (
 from fire_viewer.services.admin_contribution_dossier import (
     get_admin_public_contribution_detail,
     propose_contribution_gallery_item,
-    review_contribution_proposal,
 )
 from fire_viewer.services.admin_dashboard import get_admin_dashboard
 from fire_viewer.services.admin_incident_creation import create_admin_incident
@@ -161,31 +159,6 @@ def public_contribution_detail(
     return get_admin_public_contribution_detail(
         session, contribution_id=contribution_id, settings=settings, trace_id=trace_id
     )
-
-
-@router.post("/public-contributions/{contribution_id}/proposals/{kind}/{proposal_id}/review")
-def review_public_contribution_proposal(
-    contribution_id: str,
-    kind: str,
-    proposal_id: str,
-    payload: AdminContributionProposalReviewRequest,
-    response: Response,
-    actor: ActorDep,
-    session: SessionDep,
-    trace_id: TraceIdDep,
-) -> dict[str, bool]:
-    _require_admin(actor)
-    review_contribution_proposal(
-        session,
-        contribution_id=contribution_id,
-        kind=kind,
-        proposal_id=proposal_id,
-        payload=payload,
-        actor=actor,
-        trace_id=trace_id,
-    )
-    _private_read(response)
-    return {"ok": True}
 
 
 @router.post(

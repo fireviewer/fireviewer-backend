@@ -1,8 +1,12 @@
-"""Decision-oriented private projections for public contribution evidence.
+"""Private contribution evidence and read-only links to IA results.
 
-This module deliberately maps stored proposals to human language. It never
-returns tracking material, contact hashes, Blob URIs, prompt text or worker
-payloads.
+Contribution moderation and IA review are separate contracts. This module may
+show which IA results were derived from an eligible private contribution, but
+it never changes their review state. Facts, spatial proposals and situation
+reports are reviewed only in the existing incident spatial review.
+
+The module never returns tracking material, contact hashes, Blob URIs, prompt
+text or worker payloads.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from sqlalchemy.orm import Session
 from fire_viewer.core.config import Settings
 from fire_viewer.core.ids import new_prefixed_id
 from fire_viewer.core.security import Actor
-from fire_viewer.core.time import as_utc, utcnow
+from fire_viewer.core.time import as_utc
 from fire_viewer.db.models import (
     AgentFactProposal,
     AgentMediaBatch,
@@ -27,21 +31,15 @@ from fire_viewer.domain.contribution_schemas import (
     AdminContributionGalleryProposalRequest,
     AdminContributionGalleryState,
     AdminContributionProposal,
-    AdminContributionProposalReviewRequest,
     AdminPublicContributionDetail,
     AdminPublicContributionDetailEnvelope,
 )
 from fire_viewer.domain.enums import (
     AgentBatchState,
     AgentConsentState,
-    AgentProposalReviewState,
-    AgentReportReviewState,
     PublicContributionState,
 )
-from fire_viewer.domain.errors import ConflictError, NotFoundError
-from fire_viewer.services.agent_validation_campaigns import (
-    refresh_campaign_day_publication_state,
-)
+from fire_viewer.domain.errors import ConflictError
 from fire_viewer.services.common import record_operator_audit
 from fire_viewer.services.public_contributions import _admin_status, _load_contribution
 
@@ -209,125 +207,6 @@ def get_admin_public_contribution_detail(
         ),
         trace_id=trace_id,
     )
-
-
-def review_contribution_proposal(
-    session: Session,
-    *,
-    contribution_id: str,
-    kind: str,
-    proposal_id: str,
-    payload: AdminContributionProposalReviewRequest,
-    actor: Actor,
-    trace_id: str,
-) -> None:
-    contribution = _load_contribution(session, contribution_id, for_update=True)
-    batches = _batches_for(contribution)
-    media_ids = [item.id for batch in batches for item in batch.items]
-    if kind == "fact":
-        fact = session.scalar(
-            select(AgentFactProposal).where(
-                AgentFactProposal.fact_id == proposal_id,
-                AgentFactProposal.source_media_item_id.in_(media_ids),
-            )
-        )
-        if fact is None:
-            raise NotFoundError("contribution_proposal", proposal_id)
-        if fact.version != payload.expected_version:
-            raise ConflictError(
-                "agent_proposal_version_conflict",
-                "La proposition a changé depuis son chargement.",
-            )
-        before = {"state": fact.review_state.value, "version": fact.version}
-        fact.review_state = {
-            "validate": AgentProposalReviewState.VALIDATED,
-            "reject": AgentProposalReviewState.REJECTED,
-            "invalidate": AgentProposalReviewState.INVALIDATED,
-        }[payload.action]
-        fact.reviewed_by = actor.actor_id
-        fact.reviewed_at = utcnow()
-        fact.review_reason = payload.reason
-        fact.version += 1
-        after_state = fact.review_state.value
-        after_version = fact.version
-    elif kind == "spatial":
-        spatial = session.scalar(
-            select(AgentSpatialProposal).where(
-                AgentSpatialProposal.proposal_id == proposal_id,
-                AgentSpatialProposal.source_media_item_id.in_(media_ids),
-            )
-        )
-        if spatial is None:
-            raise NotFoundError("contribution_proposal", proposal_id)
-        if spatial.version != payload.expected_version:
-            raise ConflictError(
-                "agent_proposal_version_conflict",
-                "La proposition a changé depuis son chargement.",
-            )
-        before = {"state": spatial.review_state.value, "version": spatial.version}
-        spatial.review_state = {
-            "validate": AgentProposalReviewState.VALIDATED,
-            "reject": AgentProposalReviewState.REJECTED,
-            "invalidate": AgentProposalReviewState.INVALIDATED,
-        }[payload.action]
-        spatial.reviewed_by = actor.actor_id
-        spatial.reviewed_at = utcnow()
-        spatial.review_reason = payload.reason
-        spatial.version += 1
-        after_state = spatial.review_state.value
-        after_version = spatial.version
-    elif kind == "report":
-        windows = [
-            batch.analysis_window_id for batch in batches if batch.analysis_window_id is not None
-        ]
-        report = (
-            session.scalar(
-                select(AgentSituationReportRevision).where(
-                    AgentSituationReportRevision.report_revision_id == proposal_id,
-                    AgentSituationReportRevision.analysis_window_id.in_(windows),
-                )
-            )
-            if windows
-            else None
-        )
-        if report is None:
-            raise NotFoundError("contribution_proposal", proposal_id)
-        if report.revision != payload.expected_version:
-            raise ConflictError(
-                "agent_proposal_version_conflict",
-                "La proposition a changé depuis son chargement.",
-            )
-        before = {"state": report.review_state.value, "version": report.revision}
-        report.review_state = {
-            "validate": AgentReportReviewState.VALIDATED,
-            "reject": AgentReportReviewState.REJECTED,
-            "invalidate": AgentReportReviewState.INVALIDATED,
-        }[payload.action]
-        report.reviewed_by = actor.actor_id
-        report.reviewed_at = utcnow()
-        report.review_reason = payload.reason
-        after_state = report.review_state.value
-        after_version = report.revision
-        if payload.action == "validate":
-            refresh_campaign_day_publication_state(
-                session,
-                analysis_window_id=report.analysis_window_id,
-            )
-    else:
-        raise NotFoundError("contribution_proposal", proposal_id)
-    record_operator_audit(
-        session,
-        actor=actor,
-        action=f"agent.proposal.{payload.action}",
-        target_type=f"agent_{kind}_proposal",
-        target_id=proposal_id,
-        reason=payload.reason,
-        trace_id=trace_id,
-        before=before,
-        after={"state": after_state, "version": after_version},
-        payload={"published": False},
-    )
-    session.commit()
 
 
 def propose_contribution_gallery_item(

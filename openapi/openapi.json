@@ -5453,85 +5453,6 @@
         }
       }
     },
-    "/api/v2/admin/public-contributions/{contribution_id}/proposals/{kind}/{proposal_id}/review": {
-      "post": {
-        "tags": [
-          "admin-v2"
-        ],
-        "summary": "Review Public Contribution Proposal",
-        "operationId": "review_public_contribution_proposal_api_v2_admin_public_contributions__contribution_id__proposals__kind___proposal_id__review_post",
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "contribution_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Contribution Id"
-            }
-          },
-          {
-            "name": "kind",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Kind"
-            }
-          },
-          {
-            "name": "proposal_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Proposal Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AdminContributionProposalReviewRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": {
-                    "type": "boolean"
-                  },
-                  "title": "Response Review Public Contribution Proposal Api V2 Admin Public Contributions  Contribution Id  Proposals  Kind   Proposal Id  Review Post"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v2/admin/public-contributions/{contribution_id}/gallery-proposal": {
       "post": {
         "tags": [
@@ -7739,39 +7660,7 @@
           "version"
         ],
         "title": "AdminContributionProposal",
-        "description": "Safe, decision-oriented projection of one private agent proposal."
-      },
-      "AdminContributionProposalReviewRequest": {
-        "properties": {
-          "action": {
-            "type": "string",
-            "enum": [
-              "validate",
-              "reject",
-              "invalidate"
-            ],
-            "title": "Action"
-          },
-          "reason": {
-            "type": "string",
-            "maxLength": 500,
-            "minLength": 10,
-            "title": "Reason"
-          },
-          "expected_version": {
-            "type": "integer",
-            "minimum": 1.0,
-            "title": "Expected Version"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "action",
-          "reason",
-          "expected_version"
-        ],
-        "title": "AdminContributionProposalReviewRequest"
+        "description": "Read-only trace of an IA result linked to a private contribution."
       },
       "AdminDailyIntelligenceReview": {
         "properties": {

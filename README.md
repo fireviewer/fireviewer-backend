@@ -212,6 +212,11 @@ uniquement une nouvelle révision du calque de zone. Aucun de ces actes ne crée
 remplace le GLB courant ou ne publie automatiquement un contenu ; les validations du rapport, du
 calque et des médias restent séparées.
 
+Le dossier d'une contribution peut afficher en lecture seule les résultats IA qui utilisent cette
+preuve. Il ne peut ni valider ni rejeter ces résultats : la revue spatiale de l'incident est l'unique
+lieu de décision pour les faits, géométries et rapports produits par l'IA. La modération de la
+contribution et la proposition éventuelle d'un média à la galerie restent des décisions séparées.
+
 ## Sauvegarde SQLite
 
 ```bash
