@@ -58,6 +58,10 @@ class AmbiguousSubmitRunPod(FakeRunPod):
 
 
 class MissingRemoteRunPod(FakeRunPod):
+    def submit(self, _payload) -> dict[str, Any]:
+        self.submissions += 1
+        return {"id": f"runpod-job-after-missing-{self.submissions}", "status": "IN_QUEUE"}
+
     def status(self, _remote_job_id: str) -> dict[str, Any]:
         self.status_reads += 1
         request = httpx.Request("GET", "https://pod.example/v1/jobs/missing")
@@ -348,7 +352,7 @@ def test_missing_remote_job_is_dead_lettered_without_blocking_the_queue(
         client=runpod,
     )
     _make_due(session)
-    assert run_dispatcher_once(
+    assert not run_dispatcher_once(
         app.state.session_factory,
         worker_id="dispatcher-test",
         settings=settings,
@@ -361,6 +365,47 @@ def test_missing_remote_job_is_dead_lettered_without_blocking_the_queue(
     assert dispatch.state == AgentDispatchState.DEAD_LETTER
     assert dispatch.last_error_code == "agent_remote_not_found"
     assert runpod.status_reads == 1
+
+
+def test_missing_remote_job_is_retired_before_submitting_a_queued_batch(
+    client, session, app, settings
+) -> None:
+    _enqueue(client)
+    _make_due(session)
+    initial = FakeRunPod()
+    assert run_dispatcher_once(
+        app.state.session_factory,
+        worker_id="dispatcher-test",
+        settings=settings,
+        client=initial,
+    )
+
+    second = _batch_payload(batch_id="agent-batch-after-missing-remote")
+    assert _create(client, second, key="after-missing-remote-key").status_code == 201
+    assert (
+        client.post(
+            "/api/v2/admin/agent-batches/agent-batch-after-missing-remote/enqueue"
+        ).status_code
+        == 200
+    )
+    for dispatch in session.execute(select(AgentDispatch)).scalars():
+        dispatch.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+    session.commit()
+
+    runpod = MissingRemoteRunPod()
+    assert run_dispatcher_once(
+        app.state.session_factory,
+        worker_id="dispatcher-test",
+        settings=settings,
+        client=runpod,
+    )
+
+    session.expire_all()
+    dispatches = session.execute(select(AgentDispatch).order_by(AgentDispatch.id)).scalars().all()
+    assert dispatches[0].state == AgentDispatchState.DEAD_LETTER
+    assert dispatches[0].last_error_code == "agent_remote_not_found"
+    assert dispatches[1].state == AgentDispatchState.POLL_WAIT
+    assert runpod.submissions == 1
 
 
 def test_consent_withdrawal_cancels_queued_dispatch_locally(client, session, app, settings) -> None:

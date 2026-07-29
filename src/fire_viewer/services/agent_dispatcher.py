@@ -1026,6 +1026,18 @@ def process_claimed_dispatch(
         )
 
 
+def _is_missing_remote_job_terminal(session: Session, dispatch_id: int) -> bool:
+    """Return whether processing retired a dispatch whose remote job vanished."""
+
+    session.expire_all()
+    dispatch = session.get(AgentDispatch, dispatch_id)
+    return bool(
+        dispatch
+        and dispatch.state == AgentDispatchState.DEAD_LETTER
+        and dispatch.last_error_code == "agent_remote_not_found"
+    )
+
+
 def run_dispatcher_once(
     factory: sessionmaker[Session],
     *,
@@ -1040,29 +1052,34 @@ def run_dispatcher_once(
             purge_due_agent_media(session)
 
             # Always finish or cancel the one remote operation already in
-            # flight before claiming any queued work for another fire.
-            research_row_id = claim_next_source_research(
-                session,
-                worker_id=worker_id,
-                settings=settings,
-                states=ACTIVE_RESEARCH_STATES,
-            )
-            if research_row_id is not None:
-                process_claimed_source_research(
+            # flight before claiming any queued work for another fire. A small
+            # bounded exception is made for persisted jobs that a replacement
+            # pod no longer knows: retire those terminal 404s in this tick so
+            # they cannot consume one cron invocation each.
+            for _ in range(10):
+                research_row_id = claim_next_source_research(
                     session,
-                    research_row_id=research_row_id,
                     worker_id=worker_id,
                     settings=settings,
-                    client=client,
+                    states=ACTIVE_RESEARCH_STATES,
                 )
-                return True
-            dispatch_id = claim_next_dispatch(
-                session,
-                worker_id=worker_id,
-                settings=settings,
-                states=ACTIVE_DISPATCH_STATES,
-            )
-            if dispatch_id is not None:
+                if research_row_id is not None:
+                    process_claimed_source_research(
+                        session,
+                        research_row_id=research_row_id,
+                        worker_id=worker_id,
+                        settings=settings,
+                        client=client,
+                    )
+                    return True
+                dispatch_id = claim_next_dispatch(
+                    session,
+                    worker_id=worker_id,
+                    settings=settings,
+                    states=ACTIVE_DISPATCH_STATES,
+                )
+                if dispatch_id is None:
+                    break
                 process_claimed_dispatch(
                     session,
                     dispatch_id=dispatch_id,
@@ -1070,6 +1087,10 @@ def run_dispatcher_once(
                     settings=settings,
                     client=client,
                 )
+                if _is_missing_remote_job_terminal(session, dispatch_id):
+                    continue
+                return True
+            else:
                 return True
             if _has_active_agent_work(session):
                 return False
