@@ -143,13 +143,8 @@ def resolve_active_analysis_window(
             for day in matching_days
             if day.state == AgentValidationCampaignDayState.RUNNING
         ]
-        if len(running_days) > 1:
-            raise ConflictError(
-                "agent_campaign_active_window_invalid",
-                "The internal campaign exposes more than one running window for this incident.",
-            )
         if running_days:
-            day = running_days[0]
+            day = min(running_days, key=lambda item: item.ordinal)
             return ActiveAnalysisWindow(window=day.analysis_window, campaign_day=day)
 
         ready_days = sorted(
@@ -194,6 +189,56 @@ def resolve_active_analysis_window(
         local_date=local_date,
     )
     return ActiveAnalysisWindow(window=window, campaign_day=None)
+
+
+def resolve_requested_analysis_window(
+    session: Session,
+    *,
+    incident: IncidentSeries,
+    episode: Episode,
+    expected_analysis_window_id: str,
+) -> ActiveAnalysisWindow:
+    """Resolve one immutable runnable window without exposing a date selector.
+
+    Campaign windows are independent operational records.  Historic processing
+    may therefore queue several already-manifested days for the same incident;
+    only the stable analysis identifier accepted by the manifest can select one.
+    Outside a campaign, retain the normal current-window behaviour.
+    """
+
+    campaign = active_campaign(session)
+    if campaign is None:
+        active = resolve_active_analysis_window(session, incident=incident, episode=episode)
+        require_expected_window(
+            active,
+            expected_analysis_window_id=expected_analysis_window_id,
+        )
+        return active
+
+    matching_day = next(
+        (
+            day
+            for day in campaign.days
+            if day.analysis_window.incident_id == incident.id
+            and day.analysis_window.episode_id == episode.id
+            and day.analysis_window.analysis_id == expected_analysis_window_id
+        ),
+        None,
+    )
+    if matching_day is None:
+        raise ConflictError(
+            "agent_analysis_window_stale",
+            "The selected analysis window is not part of this incident's active campaign.",
+        )
+    if matching_day.state not in {
+        AgentValidationCampaignDayState.READY,
+        AgentValidationCampaignDayState.RUNNING,
+    }:
+        raise ConflictError(
+            "agent_campaign_day_not_runnable",
+            "The selected campaign day is not runnable in its current state.",
+        )
+    return ActiveAnalysisWindow(window=matching_day.analysis_window, campaign_day=matching_day)
 
 
 def require_expected_window(
@@ -561,8 +606,9 @@ def create_campaign_from_manifest(
                 required_operations=list(dict.fromkeys(required)),
                 declared_absences=list(dict.fromkeys(absences)),
                 # All historical windows are known, immutable and independently
-                # runnable from campaign creation.  The resolver still advances
-                # chronologically per incident once a window reaches review.
+                # runnable from campaign creation.  The operation endpoint
+                # receives only this manifest-bound window identifier, never a
+                # date selected by an operator.
                 state=AgentValidationCampaignDayState.READY,
                 activated_at=activated_at,
                 version=1,

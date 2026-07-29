@@ -356,8 +356,7 @@ def open_daily_satellite_package(
     settings: Settings,
 ) -> AgentSourcePackageOpenResponse:
     from fire_viewer.services.agent_validation_campaigns import (
-        require_expected_window,
-        resolve_active_analysis_window,
+        resolve_requested_analysis_window,
     )
 
     if settings.object_storage_backend != "vercel_blob":
@@ -370,9 +369,10 @@ def open_daily_satellite_package(
     if payload.total_size_bytes > settings.agent_source_package_max_total_bytes:
         raise BadRequestError("source_package_too_large", "The source package is too large.")
     incident, episode = _incident_episode(session, fire_id)
-    active = resolve_active_analysis_window(session, incident=incident, episode=episode)
-    require_expected_window(
-        active,
+    active = resolve_requested_analysis_window(
+        session,
+        incident=incident,
+        episode=episode,
         expected_analysis_window_id=payload.expected_analysis_window_id,
     )
     day = active.campaign_day
@@ -922,8 +922,7 @@ def _finalize_daily_satellite_package(
 ) -> AgentSourcePackageResponse:
     from fire_viewer.services.agent_validation_campaigns import (
         batch_is_allowed_for_active_campaign,
-        require_expected_window,
-        resolve_active_analysis_window,
+        resolve_requested_analysis_window,
     )
 
     if package.incident is None or package.episode is None or package.analysis_window is None:
@@ -931,13 +930,10 @@ def _finalize_daily_satellite_package(
             "daily_satellite_package_unbound",
             "The daily satellite transfer is not bound to an incident window.",
         )
-    active = resolve_active_analysis_window(
+    active = resolve_requested_analysis_window(
         session,
         incident=package.incident,
         episode=package.episode,
-    )
-    require_expected_window(
-        active,
         expected_analysis_window_id=package.analysis_window.analysis_id,
     )
     store, inventory = _daily_satellite_inventory(package, settings)

@@ -242,6 +242,17 @@ class AgentOperationStatus(StrictAgentModel):
     ) = None
 
 
+class AgentOperationWindow(StrictAgentModel):
+    """One manifest-bound operational window exposed to the admin client."""
+
+    analysis_window_id: SafeIdentifier
+    local_date: date
+    campaign_day_state: (
+        Literal["locked", "ready", "running", "review", "published", "failed"] | None
+    )
+    actions: list[AgentOperationStatus]
+
+
 class AgentOperationsOverview(StrictAgentModel):
     fire_id: str = Field(pattern=r"^FR-[0-9A-Z]{2,3}-[0-9]{5}$")
     episode_id: SafeIdentifier
@@ -251,6 +262,7 @@ class AgentOperationsOverview(StrictAgentModel):
         Literal["locked", "ready", "running", "review", "published", "failed"] | None
     )
     actions: list[AgentOperationStatus]
+    available_windows: list[AgentOperationWindow] = Field(default_factory=list)
 
 
 class AgentOperationRunRequest(StrictAgentModel):

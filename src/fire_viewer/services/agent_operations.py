@@ -21,12 +21,14 @@ from fire_viewer.domain.agent_schemas import (
     AgentOperationsOverview,
     AgentOperationStatus,
     AgentOperationType,
+    AgentOperationWindow,
 )
 from fire_viewer.domain.enums import (
     AgentBatchState,
     AgentBatchType,
     AgentConsentState,
     AgentSourceResearchState,
+    AgentValidationCampaignDayState,
 )
 from fire_viewer.domain.errors import ConflictError, NotFoundError
 from fire_viewer.services.agent_batches import enqueue_agent_batch
@@ -35,8 +37,8 @@ from fire_viewer.services.agent_validation_campaigns import (
     ActiveAnalysisWindow,
     batch_is_allowed_for_active_campaign,
     mark_running,
-    require_expected_window,
     resolve_active_analysis_window,
+    resolve_requested_analysis_window,
 )
 
 _ACTION_ORDER: tuple[AgentOperationType, ...] = (
@@ -254,7 +256,96 @@ def _overview(
             active_window.campaign_day.state.value if active_window.campaign_day else None
         ),
         actions=actions,
+        available_windows=[],
     )
+
+
+def _overview_window(
+    *,
+    incident: IncidentSeries,
+    episode: Episode,
+    active_window: ActiveAnalysisWindow,
+    settings: Settings,
+    session: Session,
+) -> AgentOperationWindow:
+    batches = [
+        batch
+        for batch in _batches_for_episode(
+            session,
+            incident_id=incident.id,
+            episode_id=episode.id,
+            analysis_window_id=active_window.window.id,
+        )
+        if batch_is_allowed_for_active_campaign(batch, active_window)
+    ]
+    overview = _overview(
+        incident=incident,
+        episode=episode,
+        active_window=active_window,
+        batches=batches,
+        research_runs=_research_for_episode(
+            session,
+            incident_id=incident.id,
+            episode_id=episode.id,
+            analysis_window_id=active_window.window.id,
+        ),
+        settings=settings,
+    )
+    return AgentOperationWindow(
+        analysis_window_id=overview.analysis_window_id,
+        local_date=overview.local_date,
+        campaign_day_state=overview.campaign_day_state,
+        actions=overview.actions,
+    )
+
+
+def _available_operation_windows(
+    session: Session,
+    *,
+    incident: IncidentSeries,
+    episode: Episode,
+    settings: Settings,
+) -> list[AgentOperationWindow]:
+    """Expose manifest-bound runnable windows; dates are informational only."""
+
+    from fire_viewer.services.agent_validation_campaigns import active_campaign
+
+    campaign = active_campaign(session)
+    if campaign is None:
+        active = resolve_active_analysis_window(session, incident=incident, episode=episode)
+        return [
+            _overview_window(
+                incident=incident,
+                episode=episode,
+                active_window=active,
+                settings=settings,
+                session=session,
+            )
+        ]
+    days = sorted(
+        (
+            day
+            for day in campaign.days
+            if day.analysis_window.incident_id == incident.id
+            and day.analysis_window.episode_id == episode.id
+            and day.state
+            in {
+                AgentValidationCampaignDayState.READY,
+                AgentValidationCampaignDayState.RUNNING,
+            }
+        ),
+        key=lambda day: (day.analysis_window.local_date, day.ordinal),
+    )
+    return [
+        _overview_window(
+            incident=incident,
+            episode=episode,
+            active_window=ActiveAnalysisWindow(window=day.analysis_window, campaign_day=day),
+            settings=settings,
+            session=session,
+        )
+        for day in days
+    ]
 
 
 def get_agent_operations(
@@ -275,7 +366,7 @@ def get_agent_operations(
         )
         if batch_is_allowed_for_active_campaign(batch, active)
     ]
-    return _overview(
+    overview = _overview(
         incident=incident,
         episode=episode,
         active_window=active,
@@ -287,6 +378,16 @@ def get_agent_operations(
             analysis_window_id=active.window.id,
         ),
         settings=settings,
+    )
+    return overview.model_copy(
+        update={
+            "available_windows": _available_operation_windows(
+                session,
+                incident=incident,
+                episode=episode,
+                settings=settings,
+            )
+        }
     )
 
 
@@ -306,9 +407,10 @@ def run_agent_operation(
             "The private inference dispatcher is not enabled.",
         )
     incident, episode = _incident_episode(session, fire_id)
-    active = resolve_active_analysis_window(session, incident=incident, episode=episode)
-    require_expected_window(
-        active,
+    active = resolve_requested_analysis_window(
+        session,
+        incident=incident,
+        episode=episode,
         expected_analysis_window_id=payload.expected_analysis_window_id,
     )
     _require_scheduled_operation(active, operation_type)

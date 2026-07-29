@@ -7,8 +7,10 @@ from datetime import UTC, date, timedelta
 import pytest
 from sqlalchemy import select
 
+from fire_viewer.core.time import as_utc
 from fire_viewer.db.models import (
     AgentAnalysisWindow,
+    AgentDispatch,
     AgentMediaItem,
     AgentValidationCampaignDay,
 )
@@ -19,6 +21,7 @@ from fire_viewer.services.agent_validation_campaigns import (
     active_campaign,
     create_campaign_from_manifest,
     resolve_active_analysis_window,
+    resolve_requested_analysis_window,
 )
 from test_agent_intelligence_v2 import _v2_payload
 
@@ -319,15 +322,14 @@ def test_campaign_makes_historical_windows_runnable_without_publication_gate(
         == windows[1].id
     )
 
-    # Once the first historical window is ready for human review, the next
-    # chronological window for this incident becomes runnable immediately.
-    # Its publication is deliberately not a dependency.
-    campaign_days[0].state = AgentValidationCampaignDayState.REVIEW
+    # Every manifest-bound historical window is independently runnable.  No
+    # previous day needs to reach review or publication first.
     assert (
-        resolve_active_analysis_window(
+        resolve_requested_analysis_window(
             session,
             incident=first_incident,
             episode=first_episode,
+            expected_analysis_window_id=windows[2].analysis_id,
         ).window.id
         == windows[2].id
     )
@@ -360,9 +362,9 @@ def test_admin_runs_historical_fontainebleau_and_trevillach_without_publication_
     """Historical windows are normal operations, not a separate replay mode.
 
     This exercises the same admin overview and operation routes used by the
-    product.  Fontainebleau and Trevillach may both run their earliest
-    historical window at once; after a worker has moved that window to review,
-    the following historical date is immediately runnable without publication.
+    product. Fontainebleau and Trevillach may run several manifest-bound
+    historical windows without waiting for any earlier window to be reviewed
+    or published.
     """
     fontainebleau, fontainebleau_episode = seed_incident(
         fire_id="FR-77-00001",
@@ -497,40 +499,44 @@ def test_admin_runs_historical_fontainebleau_and_trevillach_without_publication_
     assert all(item.state == AgentValidationCampaignDayState.READY for item in campaign_days)
 
     settings.agent_dispatch_enabled = True
-    for fire_id, expected_window in (
-        (fontainebleau.fire_id, windows_by_fire[fontainebleau.fire_id][0]),
-        (trevillach.fire_id, windows_by_fire[trevillach.fire_id][0]),
+    for fire_id, expected_windows in (
+        (fontainebleau.fire_id, windows_by_fire[fontainebleau.fire_id][:2]),
+        (trevillach.fire_id, windows_by_fire[trevillach.fire_id][:2]),
     ):
         overview = client.get(f"/api/v2/admin/agent-batches/incidents/{fire_id}/operations")
         assert overview.status_code == 200, overview.text
-        assert overview.json()["analysis_window_id"] == expected_window.analysis_id
-        launched = client.post(
-            f"/api/v2/admin/agent-batches/incidents/{fire_id}/operations/user_media/run",
-            json={"expected_analysis_window_id": expected_window.analysis_id},
-        )
-        assert launched.status_code == 200, launched.text
-        assert launched.json()["analysis_window_id"] == expected_window.analysis_id
+        assert overview.json()["analysis_window_id"] == expected_windows[0].analysis_id
+        assert [
+            item["analysis_window_id"] for item in overview.json()["available_windows"]
+        ] == [window.analysis_id for window in windows_by_fire[fire_id]]
+        for expected_window in expected_windows:
+            launched = client.post(
+                f"/api/v2/admin/agent-batches/incidents/{fire_id}/operations/user_media/run",
+                json={"expected_analysis_window_id": expected_window.analysis_id},
+            )
+            assert launched.status_code == 200, launched.text
+            assert launched.json()["analysis_window_id"] == expected_window.analysis_id
 
-    # This is the normal post-inference review state.  No campaign date is
-    # published here: the next historical window must nevertheless be usable.
-    for campaign_day in campaign_days:
-        if campaign_day.analysis_window_id in {
-            windows_by_fire[fontainebleau.fire_id][0].id,
-            windows_by_fire[trevillach.fire_id][0].id,
-        }:
-            campaign_day.state = AgentValidationCampaignDayState.REVIEW
-    session.commit()
-
-    for fire_id, expected_window in (
-        (fontainebleau.fire_id, windows_by_fire[fontainebleau.fire_id][1]),
-        (trevillach.fire_id, windows_by_fire[trevillach.fire_id][1]),
-    ):
-        overview = client.get(f"/api/v2/admin/agent-batches/incidents/{fire_id}/operations")
-        assert overview.status_code == 200, overview.text
-        assert overview.json()["analysis_window_id"] == expected_window.analysis_id
-        launched = client.post(
-            f"/api/v2/admin/agent-batches/incidents/{fire_id}/operations/user_media/run",
-            json={"expected_analysis_window_id": expected_window.analysis_id},
-        )
-        assert launched.status_code == 200, launched.text
-        assert launched.json()["analysis_window_id"] == expected_window.analysis_id
+    # The model must work inside the immutable day selected by the manifest.
+    # Check the persisted RunPod payload itself rather than merely the admin
+    # response: the worker receives the local date and its exact temporal
+    # bounds to produce day-specific spatial proposals and perimeters.
+    session.expire_all()
+    dispatches = list(session.scalars(select(AgentDispatch).order_by(AgentDispatch.id)))
+    assert len(dispatches) == 4
+    expected_by_analysis_id = {
+        window.analysis_id: window
+        for windows in windows_by_fire.values()
+        for window in windows[:2]
+    }
+    for dispatch in dispatches:
+        payload_window = dispatch.payload["analysis_window"]
+        assert isinstance(payload_window, dict)
+        expected_window = expected_by_analysis_id[payload_window["analysis_id"]]
+        assert payload_window["local_date"] == expected_window.local_date.isoformat()
+        assert payload_window["window_start_at"] == as_utc(
+            expected_window.window_start_at
+        ).isoformat().replace("+00:00", "Z")
+        assert payload_window["window_end_at"] == as_utc(
+            expected_window.window_end_at
+        ).isoformat().replace("+00:00", "Z")
