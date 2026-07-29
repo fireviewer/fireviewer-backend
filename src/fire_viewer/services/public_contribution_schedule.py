@@ -109,7 +109,7 @@ def run_public_contribution_schedule_once(
     )
     actor = Actor(actor_id="agent-scheduler:public-contributions", roles=frozenset())
     campaign = active_campaign(session)
-    campaign_window: ActiveAnalysisWindow | None = None
+    campaign_windows: dict[int, ActiveAnalysisWindow] = {}
     if campaign is not None:
         active_days = [
             day
@@ -120,22 +120,26 @@ def run_public_contribution_schedule_once(
                 AgentValidationCampaignDayState.RUNNING,
             }
         ]
-        if len(active_days) != 1:
-            raise ConflictError(
-                "agent_campaign_active_window_invalid",
-                "The internal campaign must expose exactly one runnable analysis window.",
+        campaign_windows = {
+            day.analysis_window_id: ActiveAnalysisWindow(
+                window=day.analysis_window,
+                campaign_day=day,
             )
-        campaign_window = ActiveAnalysisWindow(
-            window=active_days[0].analysis_window,
-            campaign_day=active_days[0],
-        )
+            for day in active_days
+        }
     queued = 0
     for batch in batches:
-        if campaign_window is not None and (
-            batch.analysis_window_id != campaign_window.window.id
-            or not batch_is_allowed_for_active_campaign(batch, campaign_window)
-        ):
-            continue
+        if campaign is not None:
+            analysis_window_id = batch.analysis_window_id
+            campaign_window = (
+                campaign_windows.get(analysis_window_id)
+                if analysis_window_id is not None
+                else None
+            )
+            if campaign_window is None or not batch_is_allowed_for_active_campaign(
+                batch, campaign_window
+            ):
+                continue
         try:
             outcome = enqueue_agent_batch(
                 session,

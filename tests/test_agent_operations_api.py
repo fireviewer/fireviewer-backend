@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC
+from datetime import UTC, date, datetime
 
 from sqlalchemy import select
 
-from fire_viewer.db.models import AgentAnalysisWindow, AgentMediaItem
-from fire_viewer.domain.enums import IncidentStatus
-from fire_viewer.services.agent_validation_campaigns import create_campaign_from_manifest
+from fire_viewer.db.models import (
+    AgentAnalysisWindow,
+    AgentMediaItem,
+    AgentValidationCampaignDay,
+)
+from fire_viewer.domain.enums import AgentValidationCampaignDayState, IncidentStatus
+from fire_viewer.services.agent_source_packages import ensure_daily_analysis_window
+from fire_viewer.services.agent_validation_campaigns import (
+    _advance_campaign_calendar,
+    active_campaign,
+    create_campaign_from_manifest,
+    resolve_active_analysis_window,
+)
 from test_agent_intelligence_v2 import _v2_payload
 
 
@@ -152,3 +162,125 @@ def test_admin_runs_each_available_analysis_type_without_technical_input(
     )
     assert declared_absent.status_code == 409, declared_absent.text
     assert declared_absent.json()["type"].endswith("agent_operation_declared_absent")
+
+
+def test_campaign_runs_every_incident_in_the_same_calendar_slot_before_next_day(
+    seed_incident,
+    session,
+    tmp_path,
+) -> None:
+    first_incident, first_episode = seed_incident(
+        fire_id="FR-66-00991",
+        sequence=991,
+        lon=2.72,
+        lat=42.71,
+        status=IncidentStatus.ACTIVE_CONFIRMED,
+    )
+    second_incident, second_episode = seed_incident(
+        fire_id="FR-77-00992",
+        sequence=992,
+        lon=2.68,
+        lat=48.40,
+        status=IncidentStatus.ACTIVE_CONFIRMED,
+    )
+    first_date = date(2026, 7, 12)
+    next_date = date(2026, 7, 13)
+    windows = [
+        ensure_daily_analysis_window(
+            session,
+            incident=first_incident,
+            episode=first_episode,
+            local_date=first_date,
+        ),
+        ensure_daily_analysis_window(
+            session,
+            incident=second_incident,
+            episode=second_episode,
+            local_date=first_date,
+        ),
+        ensure_daily_analysis_window(
+            session,
+            incident=first_incident,
+            episode=first_episode,
+            local_date=next_date,
+        ),
+    ]
+
+    days: list[dict[str, object]] = []
+    for ordinal, (fire_id, window, media_hash) in enumerate(
+        (
+            (first_incident.fire_id, windows[0], "a" * 64),
+            (second_incident.fire_id, windows[1], "b" * 64),
+            (first_incident.fire_id, windows[2], "c" * 64),
+        ),
+        start=1,
+    ):
+        cutoff_at = window.window_end_at
+        if cutoff_at.tzinfo is None:
+            cutoff_at = cutoff_at.replace(tzinfo=UTC)
+        day: dict[str, object] = {
+            "ordinal": ordinal,
+            "fire_id": fire_id,
+            "local_date": window.local_date.isoformat(),
+            "cutoff_at": cutoff_at.isoformat(),
+            "allowed_media_sha256": [media_hash],
+            "required_operations": ["source_research"],
+            "declared_absences": ["user_media", "satellite_media"],
+        }
+        day["manifest_sha256"] = _canonical_sha256(day, "manifest_sha256")
+        days.append(day)
+    payload: dict[str, object] = {
+        "schema_version": "2.0",
+        "campaign_id": "multi-incident-calendar-test",
+        "days": days,
+    }
+    payload["manifest_sha256"] = _canonical_sha256(payload, "manifest_sha256")
+    manifest_path = tmp_path / "multi-incident-campaign.json"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    create_campaign_from_manifest(
+        session,
+        manifest_path=manifest_path,
+        created_by="test-suite",
+    )
+
+    campaign = active_campaign(session)
+    assert campaign is not None
+    campaign_days = sorted(campaign.days, key=lambda item: item.ordinal)
+    assert [item.state for item in campaign_days] == [
+        AgentValidationCampaignDayState.READY,
+        AgentValidationCampaignDayState.READY,
+        AgentValidationCampaignDayState.LOCKED,
+    ]
+    assert (
+        resolve_active_analysis_window(
+            session,
+            incident=first_incident,
+            episode=first_episode,
+        ).window.id
+        == windows[0].id
+    )
+    assert (
+        resolve_active_analysis_window(
+            session,
+            incident=second_incident,
+            episode=second_episode,
+        ).window.id
+        == windows[1].id
+    )
+
+    campaign_days[0].state = AgentValidationCampaignDayState.PUBLISHED
+    assert _advance_campaign_calendar(campaign_days[0], now=datetime.now(UTC)) is False
+    assert campaign_days[2].state == AgentValidationCampaignDayState.LOCKED
+
+    campaign_days[1].state = AgentValidationCampaignDayState.PUBLISHED
+    assert _advance_campaign_calendar(campaign_days[1], now=datetime.now(UTC)) is True
+    assert campaign_days[2].state == AgentValidationCampaignDayState.READY
+    assert campaign.is_active is True
+    assert (
+        session.scalar(
+            select(AgentValidationCampaignDay).where(
+                AgentValidationCampaignDay.id == campaign_days[2].id
+            )
+        )
+        is campaign_days[2]
+    )

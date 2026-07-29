@@ -49,6 +49,10 @@ _ACTIVE_DAY_STATES = {
     AgentValidationCampaignDayState.RUNNING,
     AgentValidationCampaignDayState.REVIEW,
 }
+_TERMINAL_CAMPAIGN_DAY_STATES = {
+    AgentValidationCampaignDayState.PUBLISHED,
+    AgentValidationCampaignDayState.FAILED,
+}
 _OPERATIONS = {"user_media", "source_research", "satellite_media"}
 _TERMINAL_BATCH_STATES = {
     AgentBatchState.SUCCEEDED,
@@ -133,18 +137,24 @@ def resolve_active_analysis_window(
     campaign = active_campaign(session)
     if campaign is not None:
         active_days = [day for day in campaign.days if day.state in _ACTIVE_DAY_STATES]
-        if len(active_days) != 1:
+        matching_days = [
+            day
+            for day in active_days
+            if day.analysis_window.incident_id == incident.id
+            and day.analysis_window.episode_id == episode.id
+        ]
+        if len(matching_days) > 1:
             raise ConflictError(
                 "agent_campaign_active_window_invalid",
-                "The internal campaign must expose exactly one active analysis window.",
+                "The internal campaign exposes more than one active window for this incident.",
             )
-        day = active_days[0]
-        window = day.analysis_window
-        if window.incident_id != incident.id or window.episode_id != episode.id:
+        if not matching_days:
             raise ConflictError(
                 "agent_campaign_incident_locked",
-                "Another incident owns the only active campaign window.",
+                "This incident is not part of the active campaign calendar slot.",
             )
+        day = matching_days[0]
+        window = day.analysis_window
         return ActiveAnalysisWindow(window=window, campaign_day=day)
 
     local_date = utcnow().astimezone(_PARIS).date()
@@ -323,9 +333,9 @@ def refresh_campaign_day_publication_state(
         .where(AgentValidationCampaignDay.analysis_window_id == analysis_window_id)
         .options(
             selectinload(AgentValidationCampaignDay.analysis_window),
-            selectinload(AgentValidationCampaignDay.campaign).selectinload(
-                AgentValidationCampaign.days
-            ),
+            selectinload(AgentValidationCampaignDay.campaign)
+            .selectinload(AgentValidationCampaign.days)
+            .selectinload(AgentValidationCampaignDay.analysis_window),
         )
     )
     if day is None or day.state != AgentValidationCampaignDayState.REVIEW:
@@ -368,22 +378,50 @@ def refresh_campaign_day_publication_state(
     day.finished_at = now
     day.analysis_window.state = AgentAnalysisState.COMPLETED
     day.version += 1
-    next_day = next(
-        (
-            candidate
-            for candidate in sorted(day.campaign.days, key=lambda item: item.ordinal)
-            if candidate.ordinal == day.ordinal + 1
-        ),
-        None,
-    )
-    if next_day is None:
-        day.campaign.is_active = False
-        day.campaign.version += 1
-    else:
-        next_day.state = AgentValidationCampaignDayState.READY
-        next_day.activated_at = now
-        next_day.version += 1
+    _advance_campaign_calendar(day, now=now)
     session.flush()
+    return True
+
+
+def _advance_campaign_calendar(
+    completed_day: AgentValidationCampaignDay,
+    *,
+    now: datetime,
+) -> bool:
+    """Unlock one complete calendar slot, including every active incident.
+
+    Days sharing the same local date are intentionally independent analysis
+    windows.  The next date remains locked until every incident in the current
+    slot is either published or explicitly failed.
+    """
+
+    campaign = completed_day.campaign
+    current_date = completed_day.analysis_window.local_date
+    current_slot = [
+        candidate
+        for candidate in campaign.days
+        if candidate.analysis_window.local_date == current_date
+    ]
+    if any(candidate.state not in _TERMINAL_CAMPAIGN_DAY_STATES for candidate in current_slot):
+        return False
+
+    locked_days = [
+        candidate
+        for candidate in campaign.days
+        if candidate.state == AgentValidationCampaignDayState.LOCKED
+    ]
+    if not locked_days:
+        campaign.is_active = False
+        campaign.version += 1
+        return True
+
+    next_date = min(candidate.analysis_window.local_date for candidate in locked_days)
+    for candidate in locked_days:
+        if candidate.analysis_window.local_date != next_date:
+            continue
+        candidate.state = AgentValidationCampaignDayState.READY
+        candidate.activated_at = now
+        candidate.version += 1
     return True
 
 
@@ -426,6 +464,8 @@ def create_campaign_from_manifest(
     session.flush()
 
     seen_hashes: set[str] = set()
+    previous_local_date: date | None = None
+    first_local_date: date | None = None
     for ordinal, raw_day in enumerate(days, start=1):
         if not isinstance(raw_day, dict):
             raise ValueError("every campaign day must be an object")
@@ -437,6 +477,10 @@ def create_campaign_from_manifest(
         fire_id = str(raw_day.get("fire_id") or "")
         incident, episode = _incident_episode(session, fire_id)
         local_date = date.fromisoformat(str(raw_day["local_date"]))
+        if previous_local_date is not None and local_date < previous_local_date:
+            raise ValueError("campaign days must be ordered chronologically")
+        previous_local_date = local_date
+        first_local_date = first_local_date or local_date
         cutoff_at = datetime.fromisoformat(str(raw_day["cutoff_at"]).replace("Z", "+00:00"))
         if cutoff_at.tzinfo is None or cutoff_at.utcoffset() is None:
             raise ValueError(f"campaign day {ordinal} cutoff_at must be timezone-aware")
@@ -483,10 +527,10 @@ def create_campaign_from_manifest(
                 declared_absences=list(dict.fromkeys(absences)),
                 state=(
                     AgentValidationCampaignDayState.READY
-                    if ordinal == 1
+                    if local_date == first_local_date
                     else AgentValidationCampaignDayState.LOCKED
                 ),
-                activated_at=utcnow() if ordinal == 1 else None,
+                activated_at=utcnow() if local_date == first_local_date else None,
                 version=1,
             )
         )
