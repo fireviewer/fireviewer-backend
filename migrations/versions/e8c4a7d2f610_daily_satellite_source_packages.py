@@ -8,7 +8,7 @@ Create Date: 2026-07-29 09:00:00.000000
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
 revision: str = "e8c4a7d2f610"
 down_revision: str | None = "e5b7c9d2a410"
@@ -17,6 +17,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # SQLite batch migrations need schema reflection.  The production upgrade
+    # always runs online; the offline command is used only to validate that the
+    # migration chain can be rendered without touching a database.
+    if context.is_offline_mode():
+        return
+
     with op.batch_alter_table("agent_source_package") as batch_op:
         batch_op.add_column(
             sa.Column(

@@ -8,7 +8,7 @@ Create Date: 2026-07-28 11:30:00.000000
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
 revision: str = "e5b7c9d2a410"
 down_revision: str | None = "dc4a7e2f910b"
@@ -36,62 +36,73 @@ def upgrade() -> None:
         unique=False,
     )
 
-    connection = op.get_bind()
-    annotation = sa.table(
-        "agent_source_annotation",
-        sa.column("id", sa.Integer()),
-        sa.column("source_x_normalized", sa.Float()),
-        sa.column("source_y_normalized", sa.Float()),
-        sa.column("source_geometry_normalized", sa.JSON()),
-    )
-    for row in connection.execute(
-        sa.select(
-            annotation.c.id,
-            annotation.c.source_x_normalized,
-            annotation.c.source_y_normalized,
+    # Static SQL rendering has no database to inspect.  The schema contract is
+    # still rendered below; this data migration runs only during a real online
+    # upgrade, where the legacy rows are available to backfill.
+    if not context.is_offline_mode():
+        connection = op.get_bind()
+        annotation = sa.table(
+            "agent_source_annotation",
+            sa.column("id", sa.Integer()),
+            sa.column("source_x_normalized", sa.Float()),
+            sa.column("source_y_normalized", sa.Float()),
+            sa.column("source_geometry_normalized", sa.JSON()),
         )
-    ).mappings():
-        connection.execute(
-            annotation.update()
-            .where(annotation.c.id == row["id"])
-            .values(
-                source_geometry_normalized={
-                    "type": "Point",
-                    "coordinates": [
-                        row["source_x_normalized"],
-                        row["source_y_normalized"],
-                    ],
-                }
+        for row in connection.execute(
+            sa.select(
+                annotation.c.id,
+                annotation.c.source_x_normalized,
+                annotation.c.source_y_normalized,
             )
-        )
+        ).mappings():
+            connection.execute(
+                annotation.update()
+                .where(annotation.c.id == row["id"])
+                .values(
+                    source_geometry_normalized={
+                        "type": "Point",
+                        "coordinates": [
+                            row["source_x_normalized"],
+                            row["source_y_normalized"],
+                        ],
+                    }
+                )
+            )
 
-    proposal = sa.table(
-        "agent_spatial_proposal",
-        sa.column("id", sa.Integer()),
-        sa.column("status", sa.String()),
-        sa.column("longitude", sa.Float()),
-        sa.column("latitude", sa.Float()),
-        sa.column("proposal_kind", sa.String()),
-        sa.column("geometry_geojson", sa.JSON()),
-    )
-    for row in connection.execute(
-        sa.select(
-            proposal.c.id,
-            proposal.c.longitude,
-            proposal.c.latitude,
-        ).where(proposal.c.status == "ground_point")
-    ).mappings():
-        connection.execute(
-            proposal.update()
-            .where(proposal.c.id == row["id"])
-            .values(
-                proposal_kind="legacy_ground_point",
-                geometry_geojson={
-                    "type": "Point",
-                    "coordinates": [row["longitude"], row["latitude"]],
-                },
-            )
+        proposal = sa.table(
+            "agent_spatial_proposal",
+            sa.column("id", sa.Integer()),
+            sa.column("status", sa.String()),
+            sa.column("longitude", sa.Float()),
+            sa.column("latitude", sa.Float()),
+            sa.column("proposal_kind", sa.String()),
+            sa.column("geometry_geojson", sa.JSON()),
         )
+        for row in connection.execute(
+            sa.select(
+                proposal.c.id,
+                proposal.c.longitude,
+                proposal.c.latitude,
+            ).where(proposal.c.status == "ground_point")
+        ).mappings():
+            connection.execute(
+                proposal.update()
+                .where(proposal.c.id == row["id"])
+                .values(
+                    proposal_kind="legacy_ground_point",
+                    geometry_geojson={
+                        "type": "Point",
+                        "coordinates": [row["longitude"], row["latitude"]],
+                    },
+                )
+            )
+
+    # SQLite needs a reflected source table to render this copy-and-recreate
+    # operation.  Offline Alembic rendering deliberately has no connection;
+    # it has already emitted the additive columns/index above, while the real
+    # deployment migration executes the complete backfill and table rewrite.
+    if context.is_offline_mode():
+        return
 
     with op.batch_alter_table("agent_source_annotation") as batch_op:
         batch_op.drop_constraint("ck_agent_annotation_semantic_anchor", type_="check")
