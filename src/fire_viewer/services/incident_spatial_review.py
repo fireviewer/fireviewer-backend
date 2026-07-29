@@ -10,6 +10,7 @@ from shapely.geometry import MultiPolygon, Polygon, mapping, shape
 from shapely.ops import unary_union
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.sql.elements import ColumnElement
 
 from fire_viewer.core.ids import new_prefixed_id
 from fire_viewer.core.security import Actor
@@ -67,6 +68,18 @@ from fire_viewer.services.agent_validation_campaigns import (
 )
 from fire_viewer.services.common import record_operator_audit
 from fire_viewer.services.incident_gallery import map_capture_response
+
+
+def _reviewable_agent_point() -> ColumnElement[bool]:
+    """Reuse the existing marker review for legacy and native V2 point proposals."""
+
+    return or_(
+        AgentSpatialProposal.status == "ground_point",
+        and_(
+            AgentSpatialProposal.status == "projected_geometry",
+            AgentSpatialProposal.proposal_kind.in_(["active_fire_point", "smoke_origin_point"]),
+        ),
+    )
 
 
 def _incident_and_episode(session: Session, fire_id: str) -> tuple[IncidentSeries, Episode]:
@@ -267,7 +280,7 @@ def _markers(
         .where(
             AgentAnalysisWindow.incident_id == incident.id,
             AgentAnalysisWindow.episode_id == episode.id,
-            AgentSpatialProposal.status == "ground_point",
+            _reviewable_agent_point(),
         )
         .order_by(AgentSpatialProposal.observed_at.asc(), AgentSpatialProposal.proposal_id.asc())
         .limit(1_000)
@@ -314,7 +327,7 @@ def _markers(
         AdminIncidentSpatialMarker(
             marker_id=f"proposal:{item.proposal_id}",
             source_kind="agent_media",
-            marker_type="active_fire_point",
+            marker_type=item.proposal_kind or "active_fire_point",
             longitude=float(item.longitude),
             latitude=float(item.latitude),
             altitude_m=item.altitude_m,
@@ -487,7 +500,7 @@ def review_marker(
                 AgentSpatialProposal.proposal_id == proposal_id,
                 AgentAnalysisWindow.incident_id == incident.id,
                 AgentAnalysisWindow.episode_id == episode.id,
-                AgentSpatialProposal.status == "ground_point",
+                _reviewable_agent_point(),
             )
         ).scalar_one_or_none()
         if proposal is None:
@@ -612,7 +625,7 @@ def _validate_supporting_markers(
             .where(
                 AgentAnalysisWindow.incident_id == incident.id,
                 AgentAnalysisWindow.episode_id == episode.id,
-                AgentSpatialProposal.status == "ground_point",
+                _reviewable_agent_point(),
             )
         )
     }

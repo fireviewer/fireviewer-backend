@@ -1281,6 +1281,7 @@ WorkerModelRoleV2 = Literal[
     "visual_filtering",
     "visual_grounding",
     "multimodal_extraction",
+    "fire_pointing",
     "cross_view_registration",
     "consensus_judge",
 ]
@@ -1467,9 +1468,7 @@ class WorkerStageTraceV2(StrictAgentModel):
             raise ValueError("stage trace preflight must use the preflight phase")
         if self.postflight is not None and self.postflight.phase != "postflight":
             raise ValueError("stage trace postflight must use the postflight phase")
-        if [attempt.attempt for attempt in self.attempts] != list(
-            range(1, len(self.attempts) + 1)
-        ):
+        if [attempt.attempt for attempt in self.attempts] != list(range(1, len(self.attempts) + 1)):
             raise ValueError("stage attempts must be consecutive and ordered")
         if len(self.attempts) == 2:
             first, repair = self.attempts
@@ -1541,6 +1540,7 @@ class WorkerOutputV2(StrictAgentModel):
             "fire_detection": "visual_filtering",
             "visual_grounding": "visual_grounding",
             "multimodal_extraction": "multimodal_extraction",
+            "fire_pointing": "fire_pointing",
             "cross_view_registration": "cross_view_registration",
         }
         for result in self.consensus_results:

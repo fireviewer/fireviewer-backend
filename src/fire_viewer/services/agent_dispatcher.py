@@ -849,10 +849,11 @@ def _poll(
         dispatch.batch.cancelled_at = now
         dispatch.next_attempt_at = None
         _release_lease(dispatch)
-        refresh_campaign_day_review_state(
-            session,
-            analysis_window_id=dispatch.batch.analysis_window_id,
-        )
+        if dispatch.batch.analysis_window_id is not None:
+            refresh_campaign_day_review_state(
+                session,
+                analysis_window_id=dispatch.batch.analysis_window_id,
+            )
         session.commit()
         return
     _dead_letter(
@@ -882,10 +883,11 @@ def _cancel(
         dispatch.batch.cancelled_at = now
         dispatch.next_attempt_at = None
         _release_lease(dispatch)
-        refresh_campaign_day_review_state(
-            session,
-            analysis_window_id=dispatch.batch.analysis_window_id,
-        )
+        if dispatch.batch.analysis_window_id is not None:
+            refresh_campaign_day_review_state(
+                session,
+                analysis_window_id=dispatch.batch.analysis_window_id,
+            )
         session.commit()
         return
     try:
@@ -929,10 +931,11 @@ def _cancel(
     dispatch.batch.cancelled_at = now
     dispatch.next_attempt_at = None
     _release_lease(dispatch)
-    refresh_campaign_day_review_state(
-        session,
-        analysis_window_id=dispatch.batch.analysis_window_id,
-    )
+    if dispatch.batch.analysis_window_id is not None:
+        refresh_campaign_day_review_state(
+            session,
+            analysis_window_id=dispatch.batch.analysis_window_id,
+        )
     session.commit()
 
 

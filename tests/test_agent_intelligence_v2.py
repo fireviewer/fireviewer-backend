@@ -616,6 +616,46 @@ def test_campaign_creates_one_daily_consolidation_after_all_required_operations(
     assert session.scalar(select(func.count()).select_from(AgentSituationReportRevision)) == 1
 
 
+def test_native_projected_point_reuses_existing_admin_spatial_review(
+    client, session, app, settings, seed_incident
+) -> None:
+    _create_and_enqueue_v2(client, session, seed_incident, batch_type="user_media")
+    output = _v2_output()
+    item = output["items"][0]
+    proposal = item["spatial_proposals"][0]
+    proposal.update(
+        {
+            "status": "projected_geometry",
+            "proposal_kind": "active_fire_point",
+            "geometry_geojson": {
+                "type": "Point",
+                "coordinates": [5.369, 44.751],
+            },
+        }
+    )
+
+    _run_to_completion(app, session, settings, FakeRunPodV2(output))
+
+    workspace = client.get("/api/v1/admin/incidents/FR-26-00001/spatial-review")
+    assert workspace.status_code == 200, workspace.text
+    marker = next(
+        marker
+        for marker in workspace.json()["markers"]
+        if marker["marker_id"] == "proposal:spatial-fire-0001"
+    )
+    assert marker["marker_type"] == "active_fire_point"
+    reviewed = client.post(
+        "/api/v1/admin/incidents/FR-26-00001/spatial-markers/proposal:spatial-fire-0001/review",
+        json={
+            "action": "validate",
+            "expected_version": 1,
+            "reason": "Point V2 vérifié dans la revue spatiale existante.",
+        },
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["review_state"] == "VALIDATED"
+
+
 def test_campaign_reviews_failed_operation_without_content_threshold(
     client, session, app, settings, seed_incident, tmp_path
 ) -> None:

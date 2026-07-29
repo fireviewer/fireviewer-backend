@@ -40,7 +40,7 @@ from fire_viewer.services.agent_validation_campaigns import (
     resolve_active_analysis_window,
 )
 
-_ACTION_ORDER = (
+_ACTION_ORDER: tuple[AgentOperationType, ...] = (
     "user_media",
     "source_research",
     "satellite_media",
