@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date
 
 import pytest
 from sqlalchemy import select
@@ -15,7 +15,7 @@ from fire_viewer.db.models import (
 from fire_viewer.domain.enums import AgentValidationCampaignDayState, IncidentStatus
 from fire_viewer.services.agent_source_packages import ensure_daily_analysis_window
 from fire_viewer.services.agent_validation_campaigns import (
-    _advance_campaign_calendar,
+    _complete_campaign_if_terminal,
     active_campaign,
     create_campaign_from_manifest,
     resolve_active_analysis_window,
@@ -212,7 +212,7 @@ def test_admin_runs_each_available_analysis_type_without_technical_input(
     assert declared_absent.json()["type"].endswith("agent_operation_declared_absent")
 
 
-def test_campaign_runs_every_incident_in_the_same_calendar_slot_before_next_day(
+def test_campaign_makes_historical_windows_runnable_without_publication_gate(
     seed_incident,
     session,
     tmp_path,
@@ -300,7 +300,7 @@ def test_campaign_runs_every_incident_in_the_same_calendar_slot_before_next_day(
     assert [item.state for item in campaign_days] == [
         AgentValidationCampaignDayState.READY,
         AgentValidationCampaignDayState.READY,
-        AgentValidationCampaignDayState.LOCKED,
+        AgentValidationCampaignDayState.READY,
     ]
     assert (
         resolve_active_analysis_window(
@@ -319,14 +319,27 @@ def test_campaign_runs_every_incident_in_the_same_calendar_slot_before_next_day(
         == windows[1].id
     )
 
-    campaign_days[0].state = AgentValidationCampaignDayState.PUBLISHED
-    assert _advance_campaign_calendar(campaign_days[0], now=datetime.now(UTC)) is False
-    assert campaign_days[2].state == AgentValidationCampaignDayState.LOCKED
+    # Once the first historical window is ready for human review, the next
+    # chronological window for this incident becomes runnable immediately.
+    # Its publication is deliberately not a dependency.
+    campaign_days[0].state = AgentValidationCampaignDayState.REVIEW
+    assert (
+        resolve_active_analysis_window(
+            session,
+            incident=first_incident,
+            episode=first_episode,
+        ).window.id
+        == windows[2].id
+    )
 
     campaign_days[1].state = AgentValidationCampaignDayState.PUBLISHED
-    assert _advance_campaign_calendar(campaign_days[1], now=datetime.now(UTC)) is True
-    assert campaign_days[2].state == AgentValidationCampaignDayState.READY
+    campaign_days[2].state = AgentValidationCampaignDayState.PUBLISHED
+    assert _complete_campaign_if_terminal(campaign) is False
     assert campaign.is_active is True
+
+    campaign_days[0].state = AgentValidationCampaignDayState.PUBLISHED
+    assert _complete_campaign_if_terminal(campaign) is True
+    assert campaign.is_active is False
     assert (
         session.scalar(
             select(AgentValidationCampaignDay).where(

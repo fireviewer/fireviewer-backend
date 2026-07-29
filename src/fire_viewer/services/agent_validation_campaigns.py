@@ -45,11 +45,6 @@ from fire_viewer.domain.errors import ConflictError, NotFoundError
 from fire_viewer.services.agent_source_packages import ensure_daily_analysis_window
 
 _PARIS = ZoneInfo("Europe/Paris")
-_ACTIVE_DAY_STATES = {
-    AgentValidationCampaignDayState.READY,
-    AgentValidationCampaignDayState.RUNNING,
-    AgentValidationCampaignDayState.REVIEW,
-}
 _TERMINAL_CAMPAIGN_DAY_STATES = {
     AgentValidationCampaignDayState.PUBLISHED,
     AgentValidationCampaignDayState.FAILED,
@@ -137,26 +132,59 @@ def resolve_active_analysis_window(
 ) -> ActiveAnalysisWindow:
     campaign = active_campaign(session)
     if campaign is not None:
-        active_days = [day for day in campaign.days if day.state in _ACTIVE_DAY_STATES]
         matching_days = [
             day
-            for day in active_days
+            for day in campaign.days
             if day.analysis_window.incident_id == incident.id
             and day.analysis_window.episode_id == episode.id
         ]
-        if len(matching_days) > 1:
+        running_days = [
+            day
+            for day in matching_days
+            if day.state == AgentValidationCampaignDayState.RUNNING
+        ]
+        if len(running_days) > 1:
             raise ConflictError(
                 "agent_campaign_active_window_invalid",
-                "The internal campaign exposes more than one active window for this incident.",
+                "The internal campaign exposes more than one running window for this incident.",
             )
+        if running_days:
+            day = running_days[0]
+            return ActiveAnalysisWindow(window=day.analysis_window, campaign_day=day)
+
+        ready_days = sorted(
+            (
+                day
+                for day in matching_days
+                if day.state == AgentValidationCampaignDayState.READY
+            ),
+            key=lambda day: day.ordinal,
+        )
+        if ready_days:
+            day = ready_days[0]
+            return ActiveAnalysisWindow(window=day.analysis_window, campaign_day=day)
+
+        review_days = sorted(
+            (
+                day
+                for day in matching_days
+                if day.state == AgentValidationCampaignDayState.REVIEW
+            ),
+            key=lambda day: day.ordinal,
+        )
+        if review_days:
+            day = review_days[0]
+            return ActiveAnalysisWindow(window=day.analysis_window, campaign_day=day)
+
         if not matching_days:
             raise ConflictError(
                 "agent_campaign_incident_locked",
-                "This incident is not part of the active campaign calendar slot.",
+                "This incident is not part of the active internal campaign.",
             )
-        day = matching_days[0]
-        window = day.analysis_window
-        return ActiveAnalysisWindow(window=window, campaign_day=day)
+        raise ConflictError(
+            "agent_campaign_incident_complete",
+            "Every analysis window for this incident is terminal in the active campaign.",
+        )
 
     local_date = utcnow().astimezone(_PARIS).date()
     window = ensure_daily_analysis_window(
@@ -327,7 +355,7 @@ def refresh_campaign_day_publication_state(
     *,
     analysis_window_id: int,
 ) -> bool:
-    """Publish the campaign gate and unlock its successor after all human gates."""
+    """Publish one reviewed window and complete the campaign once all are terminal."""
 
     day = session.scalar(
         select(AgentValidationCampaignDay)
@@ -396,50 +424,22 @@ def refresh_campaign_day_publication_state(
     day.finished_at = now
     day.analysis_window.state = AgentAnalysisState.COMPLETED
     day.version += 1
-    _advance_campaign_calendar(day, now=now)
+    _complete_campaign_if_terminal(day.campaign)
     session.flush()
     return True
 
 
-def _advance_campaign_calendar(
-    completed_day: AgentValidationCampaignDay,
-    *,
-    now: datetime,
-) -> bool:
-    """Unlock one complete calendar slot, including every active incident.
+def _complete_campaign_if_terminal(campaign: AgentValidationCampaign) -> bool:
+    """Close a campaign only after every independent window is terminal.
 
-    Days sharing the same local date are intentionally independent analysis
-    windows.  The next date remains locked until every incident in the current
-    slot is either published or explicitly failed.
+    Historical windows are all prepared when the campaign is created.  A
+    publication validates only its own window; it never unlocks another date.
     """
 
-    campaign = completed_day.campaign
-    current_date = completed_day.analysis_window.local_date
-    current_slot = [
-        candidate
-        for candidate in campaign.days
-        if candidate.analysis_window.local_date == current_date
-    ]
-    if any(candidate.state not in _TERMINAL_CAMPAIGN_DAY_STATES for candidate in current_slot):
+    if any(day.state not in _TERMINAL_CAMPAIGN_DAY_STATES for day in campaign.days):
         return False
-
-    locked_days = [
-        candidate
-        for candidate in campaign.days
-        if candidate.state == AgentValidationCampaignDayState.LOCKED
-    ]
-    if not locked_days:
-        campaign.is_active = False
-        campaign.version += 1
-        return True
-
-    next_date = min(candidate.analysis_window.local_date for candidate in locked_days)
-    for candidate in locked_days:
-        if candidate.analysis_window.local_date != next_date:
-            continue
-        candidate.state = AgentValidationCampaignDayState.READY
-        candidate.activated_at = now
-        candidate.version += 1
+    campaign.is_active = False
+    campaign.version += 1
     return True
 
 
@@ -501,7 +501,7 @@ def create_campaign_from_manifest(
 
     seen_hashes: set[str] = set()
     previous_local_date: date | None = None
-    first_local_date: date | None = None
+    activated_at = utcnow()
     for ordinal, raw_day in enumerate(days, start=1):
         if not isinstance(raw_day, dict):
             raise ValueError("every campaign day must be an object")
@@ -516,7 +516,6 @@ def create_campaign_from_manifest(
         if previous_local_date is not None and local_date < previous_local_date:
             raise ValueError("campaign days must be ordered chronologically")
         previous_local_date = local_date
-        first_local_date = first_local_date or local_date
         cutoff_at = datetime.fromisoformat(str(raw_day["cutoff_at"]).replace("Z", "+00:00"))
         if cutoff_at.tzinfo is None or cutoff_at.utcoffset() is None:
             raise ValueError(f"campaign day {ordinal} cutoff_at must be timezone-aware")
@@ -561,12 +560,11 @@ def create_campaign_from_manifest(
                 allowed_media_sha256=sorted(set(allowed_hashes)),
                 required_operations=list(dict.fromkeys(required)),
                 declared_absences=list(dict.fromkeys(absences)),
-                state=(
-                    AgentValidationCampaignDayState.READY
-                    if local_date == first_local_date
-                    else AgentValidationCampaignDayState.LOCKED
-                ),
-                activated_at=utcnow() if local_date == first_local_date else None,
+                # All historical windows are known, immutable and independently
+                # runnable from campaign creation.  The resolver still advances
+                # chronologically per incident once a window reaches review.
+                state=AgentValidationCampaignDayState.READY,
+                activated_at=activated_at,
                 version=1,
             )
         )
