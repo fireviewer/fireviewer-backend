@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import httpx
 from pydantic import ValidationError
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from fire_viewer.core.config import Settings
@@ -274,6 +274,18 @@ def claim_next_source_research(
     if not settings.agent_research_enabled:
         return None
     now = utcnow()
+    stale_before = now - timedelta(seconds=settings.agent_dispatch_stall_seconds)
+    stale_active_remote = and_(
+        AgentSourceResearchRun.state.in_(
+            (AgentSourceResearchState.SUBMITTING, AgentSourceResearchState.RUNNING)
+        ),
+        AgentSourceResearchRun.remote_job_id.is_not(None),
+        func.coalesce(
+            AgentSourceResearchRun.last_polled_at,
+            AgentSourceResearchRun.submitted_at,
+            AgentSourceResearchRun.queued_at,
+        ) <= stale_before,
+    )
     due_id = (
         select(AgentSourceResearchRun.id)
         .where(
@@ -281,6 +293,10 @@ def claim_next_source_research(
             or_(
                 AgentSourceResearchRun.next_attempt_at.is_(None),
                 AgentSourceResearchRun.next_attempt_at <= now,
+                # A stale active research request is only polled again. Its
+                # persisted remote_job_id remains immutable, so recovery never
+                # produces a second web-research submission.
+                stale_active_remote,
             ),
             or_(
                 AgentSourceResearchRun.lease_until.is_(None),

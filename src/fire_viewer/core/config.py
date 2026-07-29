@@ -125,6 +125,7 @@ class Settings(BaseSettings):
     agent_poll_interval_seconds: int = Field(default=5, ge=2, le=300)
     public_contribution_agent_interval_seconds: int = Field(default=10_800, ge=900, le=86_400)
     agent_dispatch_lease_seconds: int = Field(default=90, ge=30, le=900)
+    agent_dispatch_stall_seconds: int = Field(default=900, ge=60, le=3_600)
     agent_dispatch_max_attempts: int = Field(default=3, ge=1, le=10)
     cron_secret: SecretStr | None = Field(
         default=None,

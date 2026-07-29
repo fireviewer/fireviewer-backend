@@ -237,6 +237,47 @@ def test_dispatcher_submits_once_and_persists_strict_output_for_review(
     assert session.scalar(select(func.count()).select_from(Job)) == 0
 
 
+def test_stale_active_remote_job_is_polled_even_if_next_attempt_is_poisoned(
+    client, session, app, settings
+) -> None:
+    _enqueue(client)
+    dispatch = _make_due(session)
+    dispatch.expected_models = {"fire_detection": "rev-ok"}
+    session.commit()
+    runpod = FakeRunPod(output=_worker_output())
+
+    assert run_dispatcher_once(
+        app.state.session_factory,
+        worker_id="dispatcher-stale-poll-test",
+        settings=settings,
+        client=runpod,
+    )
+
+    # Simulate the persisted timing corruption seen in production: the remote
+    # job was submitted, but its next poll is incorrectly scheduled far ahead.
+    dispatch.next_attempt_at = datetime.now(UTC) + timedelta(hours=2)
+    dispatch.last_polled_at = datetime.now(UTC) - timedelta(
+        seconds=settings.agent_dispatch_stall_seconds + 1
+    )
+    dispatch.lease_owner = None
+    dispatch.lease_until = None
+    session.commit()
+
+    assert run_dispatcher_once(
+        app.state.session_factory,
+        worker_id="dispatcher-stale-poll-test",
+        settings=settings,
+        client=runpod,
+    )
+
+    session.expire_all()
+    completed = session.scalar(select(AgentDispatch))
+    assert completed is not None
+    assert completed.state == AgentDispatchState.SUCCEEDED
+    assert runpod.submissions == 1
+    assert runpod.status_reads == 1
+
+
 def test_dispatcher_finishes_first_batch_before_submitting_the_next(
     client, session, app, settings
 ) -> None:

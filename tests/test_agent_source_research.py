@@ -301,7 +301,15 @@ def test_research_uses_real_contract_cutoff_dedup_and_shared_dispatcher(
         select(AgentSourceResearchRun).where(AgentSourceResearchRun.research_id == research_id)
     )
     assert run is not None
-    run.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+    # A malformed persisted next_attempt_at must not stop a submitted research
+    # run from being polled forever. The recovery path keeps the remote id and
+    # therefore cannot create a second submission.
+    run.next_attempt_at = datetime.now(UTC) + timedelta(hours=2)
+    run.last_polled_at = datetime.now(UTC) - timedelta(
+        seconds=settings.agent_dispatch_stall_seconds + 1
+    )
+    run.lease_owner = None
+    run.lease_until = None
     session.commit()
     assert run_dispatcher_once(
         client.app.state.session_factory,
@@ -316,6 +324,8 @@ def test_research_uses_real_contract_cutoff_dedup_and_shared_dispatcher(
     )
     assert completed is not None
     assert completed.state == AgentSourceResearchState.SUCCEEDED
+    assert runpod.submissions == 1
+    assert runpod.status_reads == 1
     candidates = {
         candidate.candidate_id: candidate
         for candidate in session.scalars(select(AgentSourceCandidate))

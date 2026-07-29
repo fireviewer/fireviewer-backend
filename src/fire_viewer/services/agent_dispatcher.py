@@ -7,6 +7,7 @@ of being submitted again.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from contextlib import suppress
 from datetime import datetime, timedelta
@@ -14,7 +15,7 @@ from typing import Any, Protocol
 
 import httpx
 from pydantic import ValidationError
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
@@ -60,6 +61,8 @@ from fire_viewer.services.agent_validation_campaigns import (
     refresh_campaign_day_review_state,
 )
 from fire_viewer.services.common import record_operator_audit
+
+logger = logging.getLogger(__name__)
 
 ACTIVE_REMOTE_STATES = frozenset({"IN_QUEUE", "IN_PROGRESS", "RUNNING"})
 TERMINAL_REMOTE_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"})
@@ -248,11 +251,29 @@ def claim_next_dispatch(
     """Atomically lease one due dispatch on both SQLite and PostgreSQL."""
 
     now = utcnow()
+    stale_before = now - timedelta(seconds=settings.agent_dispatch_stall_seconds)
+    stale_active_remote = and_(
+        AgentDispatch.state.in_(ACTIVE_DISPATCH_STATES),
+        AgentDispatch.remote_job_id.is_not(None),
+        func.coalesce(
+            AgentDispatch.last_polled_at,
+            AgentDispatch.submitted_at,
+            AgentDispatch.created_at,
+        ) <= stale_before,
+    )
     due_id = (
         select(AgentDispatch.id)
         .where(
             AgentDispatch.state.in_(states),
-            or_(AgentDispatch.next_attempt_at.is_(None), AgentDispatch.next_attempt_at <= now),
+            or_(
+                AgentDispatch.next_attempt_at.is_(None),
+                AgentDispatch.next_attempt_at <= now,
+                # A persisted next_attempt_at must never hold an
+                # already-submitted remote job forever. Reclaiming it only
+                # performs a status poll; it cannot cross the at-most-once
+                # submission fence again.
+                stale_active_remote,
+            ),
             or_(AgentDispatch.lease_until.is_(None), AgentDispatch.lease_until <= now),
         )
         .order_by(AgentDispatch.next_attempt_at, AgentDispatch.id)
@@ -1047,6 +1068,10 @@ def run_dispatcher_once(
 ) -> bool:
     with factory() as session:
         if not _try_global_dispatch_lock(session):
+            logger.warning(
+                "agent_dispatch_skipped_global_lock",
+                extra={"worker_id": worker_id},
+            )
             return False
         try:
             purge_due_agent_media(session)
@@ -1093,6 +1118,10 @@ def run_dispatcher_once(
             else:
                 return True
             if _has_active_agent_work(session):
+                logger.warning(
+                    "agent_dispatch_skipped_active_work_not_due",
+                    extra={"worker_id": worker_id},
+                )
                 return False
 
             research_row_id = claim_next_source_research(
