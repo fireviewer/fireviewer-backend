@@ -6013,6 +6013,73 @@
         }
       }
     },
+    "/api/v2/admin/agent-batches/incidents/{fire_id}/daily-inputs/satellite/open": {
+      "post": {
+        "tags": [
+          "admin-agent-batches"
+        ],
+        "summary": "Open Incident Daily Satellite Package",
+        "operationId": "open_incident_daily_satellite_package_api_v2_admin_agent_batches_incidents__fire_id__daily_inputs_satellite_open_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "fire_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^FR-[0-9A-Z]{2,3}-[0-9]{5}$",
+              "title": "Fire Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentDailySatellitePackageOpenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentSourcePackageOpenResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/admin/agent-batches/source-packages/{package_id}/finalize": {
       "post": {
         "tags": [
@@ -6092,64 +6159,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AgentSourcePackageResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v2/admin/agent-batches/incidents/{fire_id}/source-research": {
-      "post": {
-        "tags": [
-          "admin-agent-batches"
-        ],
-        "summary": "Run Incident Source Research",
-        "operationId": "run_incident_source_research_api_v2_admin_agent_batches_incidents__fire_id__source_research_post",
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "fire_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^FR-[0-9A-Z]{2,3}-[0-9]{5}$",
-              "title": "Fire Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentSourceResearchRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "202": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentSourceResearchResponse"
                 }
               }
             }
@@ -15100,6 +15109,35 @@
         ],
         "title": "AgentConsentWithdrawResponse"
       },
+      "AgentDailySatellitePackageOpenRequest": {
+        "properties": {
+          "expected_analysis_window_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "title": "Expected Analysis Window Id"
+          },
+          "file_count": {
+            "type": "integer",
+            "maximum": 5000.0,
+            "exclusiveMinimum": 1.0,
+            "title": "File Count"
+          },
+          "total_size_bytes": {
+            "type": "integer",
+            "maximum": 4294967296.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Total Size Bytes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "expected_analysis_window_id",
+          "file_count",
+          "total_size_bytes"
+        ],
+        "title": "AgentDailySatellitePackageOpenRequest"
+      },
       "AgentDispatchResponse": {
         "properties": {
           "dispatch_id": {
@@ -15527,6 +15565,16 @@
               }
             ]
           },
+          "hotspot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HotspotMetadataV2"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "frames": {
             "items": {
               "$ref": "#/components/schemas/WorkerFrameInput"
@@ -15606,7 +15654,8 @@
           "video",
           "audio",
           "article",
-          "satellite_image"
+          "satellite_image",
+          "satellite_data"
         ],
         "title": "AgentMediaType"
       },
@@ -16122,6 +16171,14 @@
         ],
         "title": "AgentSourcePackageItemResponse"
       },
+      "AgentSourcePackageKind": {
+        "type": "string",
+        "enum": [
+          "USER_SOURCES",
+          "ADMIN_SATELLITE"
+        ],
+        "title": "AgentSourcePackageKind"
+      },
       "AgentSourcePackageOpenRequest": {
         "properties": {
           "file_count": {
@@ -16239,6 +16296,9 @@
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
             "title": "Package Id"
           },
+          "package_kind": {
+            "$ref": "#/components/schemas/AgentSourcePackageKind"
+          },
           "fire_id": {
             "anyOf": [
               {
@@ -16332,6 +16392,7 @@
         "type": "object",
         "required": [
           "package_id",
+          "package_kind",
           "state",
           "known_start_date",
           "known_end_date",
@@ -16355,34 +16416,6 @@
           "PURGED"
         ],
         "title": "AgentSourcePackageState"
-      },
-      "AgentSourceResearchRequest": {
-        "properties": {
-          "local_date": {
-            "type": "string",
-            "format": "date",
-            "title": "Local Date"
-          },
-          "location_hint": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 500,
-                "minLength": 2
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Location Hint"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "local_date"
-        ],
-        "title": "AgentSourceResearchRequest"
       },
       "AgentSourceResearchResponse": {
         "properties": {
@@ -17199,6 +17232,72 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "HotspotMetadataV2": {
+        "properties": {
+          "product_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "title": "Product Id"
+          },
+          "provider": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Provider"
+          },
+          "acquired_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Acquired At"
+          },
+          "sensor_names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "minItems": 1,
+            "title": "Sensor Names"
+          },
+          "resolution_m": {
+            "type": "number",
+            "maximum": 100000.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Resolution M"
+          },
+          "bbox_wgs84": {
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "type": "array",
+            "maxItems": 4,
+            "minItems": 4,
+            "title": "Bbox Wgs84"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "product_id",
+          "provider",
+          "acquired_at",
+          "sensor_names",
+          "resolution_m",
+          "bbox_wgs84"
+        ],
+        "title": "HotspotMetadataV2"
       },
       "IncidentDiscoveryItem": {
         "properties": {
@@ -20657,7 +20756,8 @@
               "terrain_mnt",
               "surface_dsm",
               "orthophoto",
-              "scene_catalog"
+              "scene_catalog",
+              "source_manifest"
             ],
             "title": "Kind"
           },

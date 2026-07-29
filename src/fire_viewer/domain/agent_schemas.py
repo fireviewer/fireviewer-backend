@@ -17,6 +17,7 @@ from fire_viewer.domain.enums import (
     AgentDispatchState,
     AgentMediaType,
     AgentSourceCandidateState,
+    AgentSourcePackageKind,
     AgentSourcePackageState,
     AgentSourceResearchState,
 )
@@ -297,6 +298,84 @@ class AgentSourcePackageOpenResponse(StrictAgentModel):
     allowed_content_types: list[str]
 
 
+class AgentDailySatellitePackageOpenRequest(StrictAgentModel):
+    expected_analysis_window_id: SafeIdentifier
+    file_count: int = Field(gt=1, le=5_000)
+    total_size_bytes: int = Field(gt=0, le=4_294_967_296)
+
+
+class AgentDailySatelliteImageManifestItem(StrictAgentModel):
+    kind: Literal["satellite_image"]
+    filename: str = Field(min_length=1, max_length=500)
+    sha256: Sha256Hex
+    product_id: SafeIdentifier
+    provider: str = Field(min_length=1, max_length=128)
+    acquired_at: datetime
+    bbox_wgs84: tuple[float, float, float, float]
+    resolution_m: float = Field(gt=0, le=100_000)
+    bands: list[str] = Field(min_length=1, max_length=32)
+    cloud_cover_percent: float | None = Field(default=None, ge=0, le=100)
+    source_reference_url: AnyHttpUrl
+    license_identifier: str = Field(min_length=1, max_length=128)
+    attribution: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_image_product(self) -> AgentDailySatelliteImageManifestItem:
+        if not _is_timezone_aware(self.acquired_at):
+            raise ValueError("satellite acquisition time must include a timezone")
+        min_lon, min_lat, max_lon, max_lat = self.bbox_wgs84
+        if not (-180 <= min_lon < max_lon <= 180 and -90 <= min_lat < max_lat <= 90):
+            raise ValueError("satellite bbox must be an ordered WGS84 extent")
+        if len(self.bands) != len(set(self.bands)):
+            raise ValueError("satellite band names must be unique")
+        return self
+
+
+class AgentDailyHotspotManifestItem(StrictAgentModel):
+    kind: Literal["hotspot_geojson"]
+    filename: str = Field(min_length=1, max_length=500)
+    sha256: Sha256Hex
+    product_id: SafeIdentifier
+    provider: str = Field(min_length=1, max_length=128)
+    acquired_at: datetime
+    bbox_wgs84: tuple[float, float, float, float]
+    resolution_m: float = Field(gt=0, le=100_000)
+    sensor_names: list[str] = Field(min_length=1, max_length=16)
+    source_reference_url: AnyHttpUrl
+    license_identifier: str = Field(min_length=1, max_length=128)
+    attribution: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_hotspot_product(self) -> AgentDailyHotspotManifestItem:
+        if not _is_timezone_aware(self.acquired_at):
+            raise ValueError("hotspot acquisition time must include a timezone")
+        min_lon, min_lat, max_lon, max_lat = self.bbox_wgs84
+        if not (-180 <= min_lon < max_lon <= 180 and -90 <= min_lat < max_lat <= 90):
+            raise ValueError("hotspot bbox must be an ordered WGS84 extent")
+        if len(self.sensor_names) != len(set(self.sensor_names)):
+            raise ValueError("hotspot sensor names must be unique")
+        return self
+
+
+AgentDailySatelliteManifestItem = Annotated[
+    AgentDailySatelliteImageManifestItem | AgentDailyHotspotManifestItem,
+    Field(discriminator="kind"),
+]
+
+
+class AgentDailySatelliteManifest(StrictAgentModel):
+    schema_version: Literal["1.0"] = "1.0"
+    expected_analysis_window_id: SafeIdentifier
+    items: list[AgentDailySatelliteManifestItem] = Field(min_length=1, max_length=4_999)
+
+    @model_validator(mode="after")
+    def validate_unique_files(self) -> AgentDailySatelliteManifest:
+        filenames = [item.filename for item in self.items]
+        if len(filenames) != len(set(filenames)):
+            raise ValueError("daily satellite manifest filenames must be unique")
+        return self
+
+
 class AgentSourcePackageItemResponse(StrictAgentModel):
     item_id: SafeIdentifier
     original_filename: str
@@ -311,6 +390,7 @@ class AgentSourcePackageItemResponse(StrictAgentModel):
 
 class AgentSourcePackageResponse(StrictAgentModel):
     package_id: SafeIdentifier
+    package_kind: AgentSourcePackageKind
     fire_id: str | None = Field(default=None, pattern=r"^FR-[0-9A-Z]{2,3}-[0-9]{5}$")
     episode_id: SafeIdentifier | None = None
     state: AgentSourcePackageState
@@ -323,11 +403,6 @@ class AgentSourcePackageResponse(StrictAgentModel):
     finalized_at: datetime | None
     batch_ids: list[SafeIdentifier]
     items: list[AgentSourcePackageItemResponse]
-
-
-class AgentSourceResearchRequest(StrictAgentModel):
-    local_date: date
-    location_hint: str | None = Field(default=None, min_length=2, max_length=500)
 
 
 class AgentSourceCandidateResponse(StrictAgentModel):
@@ -780,8 +855,34 @@ class SatelliteMetadataV2(StrictAgentModel):
         return self
 
 
+class HotspotMetadataV2(StrictAgentModel):
+    product_id: SafeIdentifier
+    provider: str = Field(min_length=1, max_length=128)
+    acquired_at: datetime
+    sensor_names: list[str] = Field(min_length=1, max_length=16)
+    resolution_m: float = Field(gt=0, le=100_000)
+    bbox_wgs84: tuple[float, float, float, float]
+
+    @model_validator(mode="after")
+    def validate_hotspots(self) -> HotspotMetadataV2:
+        if not _is_timezone_aware(self.acquired_at):
+            raise ValueError("hotspot acquisition time must include a timezone")
+        if len(self.sensor_names) != len(set(self.sensor_names)):
+            raise ValueError("hotspot sensor names must be unique")
+        min_lon, min_lat, max_lon, max_lat = self.bbox_wgs84
+        if not (-180 <= min_lon < max_lon <= 180 and -90 <= min_lat < max_lat <= 90):
+            raise ValueError("hotspot bbox must be an ordered WGS84 extent")
+        return self
+
+
 class SpatialReferenceAssetV2(StrictAgentModel):
-    kind: Literal["terrain_mnt", "surface_dsm", "orthophoto", "scene_catalog"]
+    kind: Literal[
+        "terrain_mnt",
+        "surface_dsm",
+        "orthophoto",
+        "scene_catalog",
+        "source_manifest",
+    ]
     working_file_url: AnyHttpUrl
     sha256: Sha256Hex
     crs: str = Field(min_length=3, max_length=128)
@@ -809,6 +910,7 @@ class WorkerBatchItemV2(StrictAgentModel):
     captured_at: datetime | None = None
     camera: CameraMetadataV2 | None = None
     satellite: SatelliteMetadataV2 | None = None
+    hotspot: HotspotMetadataV2 | None = None
     frames: list[WorkerFrameInput] = Field(default_factory=list, max_length=64)
     audio_url: AnyHttpUrl | None = None
     article_text: str | None = Field(default=None, max_length=100_000)
@@ -826,8 +928,17 @@ class WorkerBatchItemV2(StrictAgentModel):
                 raise ValueError("satellite images require satellite metadata")
             if self.camera is not None:
                 raise ValueError("satellite images cannot carry terrestrial camera metadata")
+            if self.hotspot is not None:
+                raise ValueError("satellite images cannot carry hotspot metadata")
+        elif self.media_type == AgentMediaType.SATELLITE_DATA:
+            if self.hotspot is None or self.article_text is None:
+                raise ValueError("satellite data require hotspot metadata and GeoJSON text")
+            if self.camera is not None or self.satellite is not None:
+                raise ValueError("satellite data cannot carry image or camera metadata")
         elif self.satellite is not None:
             raise ValueError("satellite metadata is reserved for satellite images")
+        elif self.hotspot is not None:
+            raise ValueError("hotspot metadata is reserved for satellite data")
         if self.camera is not None and self.media_type not in {
             AgentMediaType.IMAGE,
             AgentMediaType.VIDEO,
@@ -872,15 +983,14 @@ class AgentBatchCreateRequestV2(StrictAgentModel):
             raise ValueError("input_id values must be unique")
         if sum(len(item.frames) for item in self.items) > 256:
             raise ValueError("a batch may contain at most 256 frames")
-        has_satellite = any(
-            item.media_type == AgentMediaType.SATELLITE_IMAGE for item in self.items
-        )
+        satellite_types = {AgentMediaType.SATELLITE_IMAGE, AgentMediaType.SATELLITE_DATA}
+        has_satellite = any(item.media_type in satellite_types for item in self.items)
         if self.batch_type == AgentBatchType.SATELLITE_MEDIA and not all(
-            item.media_type == AgentMediaType.SATELLITE_IMAGE for item in self.items
+            item.media_type in satellite_types for item in self.items
         ):
-            raise ValueError("satellite batches may contain only satellite images")
+            raise ValueError("satellite batches may contain only satellite images or data")
         if self.batch_type != AgentBatchType.SATELLITE_MEDIA and has_satellite:
-            raise ValueError("satellite images require a satellite batch")
+            raise ValueError("satellite inputs require a satellite batch")
         return self
 
 
@@ -909,15 +1019,14 @@ class WorkerInputV2(StrictAgentModel):
             raise ValueError("input_id values must be unique")
         if sum(len(item.frames) for item in self.items) > 256:
             raise ValueError("a batch may contain at most 256 frames")
-        has_satellite = any(
-            item.media_type == AgentMediaType.SATELLITE_IMAGE for item in self.items
-        )
+        satellite_types = {AgentMediaType.SATELLITE_IMAGE, AgentMediaType.SATELLITE_DATA}
+        has_satellite = any(item.media_type in satellite_types for item in self.items)
         if self.batch_type == AgentBatchType.SATELLITE_MEDIA and not all(
-            item.media_type == AgentMediaType.SATELLITE_IMAGE for item in self.items
+            item.media_type in satellite_types for item in self.items
         ):
-            raise ValueError("satellite batches may contain only satellite images")
+            raise ValueError("satellite batches may contain only satellite images or data")
         if self.batch_type != AgentBatchType.SATELLITE_MEDIA and has_satellite:
-            raise ValueError("satellite images require a satellite batch")
+            raise ValueError("satellite inputs require a satellite batch")
         return self
 
 

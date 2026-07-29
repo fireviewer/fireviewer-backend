@@ -25,6 +25,7 @@ from fire_viewer.db.models import (
     AgentMediaBatch,
     AgentSituationReportRevision,
     AgentSourceResearchRun,
+    AgentSpatialProposal,
     AgentValidationCampaign,
     AgentValidationCampaignDay,
     Episode,
@@ -358,6 +359,17 @@ def refresh_campaign_day_publication_state(
         .order_by(AgentSituationReportRevision.revision.desc())
         .limit(1)
     )
+    has_projected_geometry = (
+        session.scalar(
+            select(AgentSpatialProposal.id)
+            .where(
+                AgentSpatialProposal.analysis_window_id == analysis_window_id,
+                AgentSpatialProposal.status == "projected_geometry",
+            )
+            .limit(1)
+        )
+        is not None
+    )
     capture = (
         session.scalar(
             select(IncidentMapCapture)
@@ -370,7 +382,13 @@ def refresh_campaign_day_publication_state(
         if zone is not None
         else None
     )
-    if zone is None or report is None or capture is None:
+    if report is None:
+        return False
+    # A reviewed spatial abstention is a valid daily outcome. It publishes the
+    # sourced report without manufacturing a replacement perimeter or gallery
+    # capture. Conversely, any projected geometry must complete the existing
+    # zone + capture review gate before publication.
+    if has_projected_geometry and (zone is None or capture is None):
         return False
 
     now = utcnow()
@@ -444,6 +462,24 @@ def create_campaign_from_manifest(
     actual_campaign_hash = _canonical_digest(payload, excluded_key="manifest_sha256")
     if declared_campaign_hash != actual_campaign_hash:
         raise ValueError("campaign manifest SHA-256 does not match its canonical payload")
+    for ordinal, raw_day in enumerate(days, start=1):
+        if not isinstance(raw_day, dict):
+            raise ValueError("every campaign day must be an object")
+        expected_sources = raw_day.get("expected_public_sources")
+        if (
+            not isinstance(expected_sources, list)
+            or not expected_sources
+            or any(
+                not isinstance(value, str)
+                or not value.startswith("https://")
+                or len(value) > 2_048
+                for value in expected_sources
+            )
+            or len(expected_sources) != len(set(expected_sources))
+        ):
+            raise ValueError(
+                f"campaign day {ordinal} requires at least one unique HTTPS provenance source"
+            )
     if active_campaign(session) is not None:
         raise ConflictError(
             "agent_campaign_already_active",

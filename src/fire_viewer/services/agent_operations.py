@@ -21,7 +21,6 @@ from fire_viewer.domain.agent_schemas import (
     AgentOperationsOverview,
     AgentOperationStatus,
     AgentOperationType,
-    AgentSourceResearchRequest,
 )
 from fire_viewer.domain.enums import (
     AgentBatchState,
@@ -342,10 +341,8 @@ def run_agent_operation(
         research = create_source_research(
             session,
             fire_id=fire_id,
-            payload=AgentSourceResearchRequest(
-                local_date=active.window.local_date,
-                location_hint=incident.canonical_name or fire_id,
-            ),
+            expected_analysis_window_id=active.window.analysis_id,
+            location_hint=incident.canonical_name or fire_id,
             actor=actor,
             trace_id=trace_id,
             settings=settings,

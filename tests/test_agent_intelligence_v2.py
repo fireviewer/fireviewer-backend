@@ -551,6 +551,7 @@ def test_campaign_creates_one_daily_consolidation_after_all_required_operations(
         "local_date": window.local_date.isoformat(),
         "cutoff_at": cutoff_at.isoformat(),
         "allowed_media_sha256": [media.media_sha256],
+        "expected_public_sources": ["https://example.test/die/source"],
         "required_operations": ["user_media"],
         "declared_absences": ["source_research", "satellite_media"],
     }
@@ -847,6 +848,7 @@ def test_campaign_reviews_failed_operation_without_content_threshold(
         "local_date": window.local_date.isoformat(),
         "cutoff_at": cutoff_at.isoformat(),
         "allowed_media_sha256": [media.media_sha256],
+        "expected_public_sources": ["https://example.test/die/source"],
         "required_operations": ["user_media"],
         "declared_absences": ["source_research", "satellite_media"],
     }
@@ -913,3 +915,21 @@ def test_campaign_reviews_failed_operation_without_content_threshold(
     assert reviewed_report.json()["review_state"] == "VALIDATED"
     session.refresh(campaign_day)
     assert campaign_day.state == AgentValidationCampaignDayState.REVIEW
+
+    from fire_viewer.services.agent_validation_campaigns import (
+        refresh_campaign_day_publication_state,
+    )
+
+    assert refresh_campaign_day_publication_state(session, analysis_window_id=window.id) is True
+    session.commit()
+    session.refresh(campaign_day)
+    assert campaign_day.state == AgentValidationCampaignDayState.PUBLISHED
+
+    published = client.get("/api/v1/incident/FR-26-00001/public-view")
+    assert published.status_code == 200, published.text
+    published_payload = published.json()
+    assert len(published_payload["daily_intelligence"]) == 1
+    assert published_payload["daily_intelligence"][0]["analysis_id"] == window.analysis_id
+    assert published_payload["daily_intelligence"][0]["spatial_results"] == []
+    assert published_payload["active_fire_zone"] is None
+    assert published_payload["map_gallery"] == []

@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
+import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import PurePosixPath
+from typing import Any, cast
 from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
 
 import jwt
 from PIL import Image, UnidentifiedImageError
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
+from tifffile import TiffFile, TiffFileError
 
 from fire_viewer.core.config import Settings
 from fire_viewer.core.ids import new_prefixed_id
@@ -33,6 +38,10 @@ from fire_viewer.db.models import (
     IncidentSeries,
 )
 from fire_viewer.domain.agent_schemas import (
+    AgentDailyHotspotManifestItem,
+    AgentDailySatelliteImageManifestItem,
+    AgentDailySatelliteManifest,
+    AgentDailySatellitePackageOpenRequest,
     AgentSourcePackageItemResponse,
     AgentSourcePackageOpenRequest,
     AgentSourcePackageOpenResponse,
@@ -46,22 +55,37 @@ from fire_viewer.domain.enums import (
     AgentConsentBasis,
     AgentConsentState,
     AgentMediaType,
+    AgentSourcePackageKind,
     AgentSourcePackageState,
 )
 from fire_viewer.domain.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
 from fire_viewer.domain.hashing import sha256_hex
 from fire_viewer.services.blob_uploads import (
+    ALLOWED_DAILY_SATELLITE_CONTENT_TYPES,
     ALLOWED_SOURCE_CONTENT_TYPES,
     create_source_blob_upload_grant,
 )
 from fire_viewer.services.common import record_operator_audit
 from fire_viewer.storage import build_object_store
-from fire_viewer.storage.object_store import ObjectStorageError
+from fire_viewer.storage.object_store import ObjectMetadata, ObjectStorageError, ObjectStore
 
 _MEDIA_JWT_ISSUER = "fire-viewer-api"
 _MEDIA_JWT_AUDIENCE = "fire-viewer-agent-private-media"
 _TERMS_VERSION = "firewarning-private-analysis-v1"
+_ADMIN_SATELLITE_TERMS_VERSION = "firewarning-admin-satellite-v1"
+_DAILY_SATELLITE_MANIFEST_NAME = "fireviewer-satellite-manifest.json"
 _TIMEZONE = ZoneInfo("Europe/Paris")
+_CANONICAL_BURNED_AREA_BANDS = (
+    "BLUE",
+    "GREEN",
+    "RED",
+    "NIR_NARROW",
+    "SWIR_1",
+    "SWIR_2",
+)
+_BAND_ORDER_TAG = re.compile(
+    r'<Item name="FIREVIEWER_BAND_ORDER">([^<]{1,512})</Item>'
+)
 _SUFFIX_MEDIA: dict[str, tuple[AgentMediaType, str]] = {
     ".jpg": (AgentMediaType.IMAGE, "image/jpeg"),
     ".jpeg": (AgentMediaType.IMAGE, "image/jpeg"),
@@ -156,6 +180,7 @@ def _load_package(session: Session, package_id: str) -> AgentSourcePackage:
         .options(
             selectinload(AgentSourcePackage.incident),
             selectinload(AgentSourcePackage.episode),
+            selectinload(AgentSourcePackage.analysis_window),
             selectinload(AgentSourcePackage.public_contribution),
             selectinload(AgentSourcePackage.items)
             .selectinload(AgentSourcePackageItem.agent_media_item)
@@ -177,6 +202,7 @@ def _package_response(package: AgentSourcePackage) -> AgentSourcePackageResponse
     )
     return AgentSourcePackageResponse(
         package_id=package.package_id,
+        package_kind=package.package_kind,
         fire_id=package.incident.fire_id if package.incident is not None else None,
         episode_id=package.episode.episode_id if package.episode is not None else None,
         state=package.state,
@@ -272,6 +298,7 @@ def open_source_package(
         incident_id=incident.id,
         episode_id=episode.id,
         analysis_window_id=None,
+        package_kind=AgentSourcePackageKind.USER_SOURCES,
         state=AgentSourcePackageState.OPEN,
         upload_id=grant.upload_id,
         pathname_prefix=grant.pathname_prefix,
@@ -315,6 +342,148 @@ def open_source_package(
         expires_at=grant.expires_at,
         maximum_file_size_bytes=settings.agent_source_package_max_file_bytes,
         allowed_content_types=list(ALLOWED_SOURCE_CONTENT_TYPES),
+    )
+
+
+def open_daily_satellite_package(
+    session: Session,
+    *,
+    fire_id: str,
+    payload: AgentDailySatellitePackageOpenRequest,
+    idempotency_key: str,
+    actor: Actor,
+    trace_id: str,
+    settings: Settings,
+) -> AgentSourcePackageOpenResponse:
+    from fire_viewer.services.agent_validation_campaigns import (
+        require_expected_window,
+        resolve_active_analysis_window,
+    )
+
+    if settings.object_storage_backend != "vercel_blob":
+        raise ConflictError(
+            "source_upload_unavailable",
+            "Private browser source uploads require the configured Vercel Blob store.",
+        )
+    if payload.file_count > settings.agent_source_package_max_files:
+        raise BadRequestError("too_many_source_files", "The source package has too many files.")
+    if payload.total_size_bytes > settings.agent_source_package_max_total_bytes:
+        raise BadRequestError("source_package_too_large", "The source package is too large.")
+    incident, episode = _incident_episode(session, fire_id)
+    active = resolve_active_analysis_window(session, incident=incident, episode=episode)
+    require_expected_window(
+        active,
+        expected_analysis_window_id=payload.expected_analysis_window_id,
+    )
+    day = active.campaign_day
+    if day is not None:
+        required = set(day.required_operations)
+        if "satellite_media" not in required:
+            reason = (
+                "This operation is explicitly absent from the active analysis window."
+                if "satellite_media" in set(day.declared_absences)
+                else "This operation is not scheduled in the active analysis window."
+            )
+            raise ConflictError("agent_satellite_input_not_scheduled", reason)
+
+    request_hash = sha256_hex(payload)
+    existing = session.scalar(
+        select(AgentSourcePackage).where(
+            AgentSourcePackage.idempotency_key == idempotency_key
+        )
+    )
+    if existing is not None:
+        if (
+            existing.incident_id != incident.id
+            or existing.episode_id != episode.id
+            or existing.analysis_window_id != active.window.id
+            or existing.package_kind != AgentSourcePackageKind.ADMIN_SATELLITE
+            or existing.request_hash != request_hash
+        ):
+            raise ConflictError(
+                "source_package_idempotency_conflict",
+                "The idempotency key was already used for another source package.",
+            )
+        grant = create_source_blob_upload_grant(
+            package_id=existing.package_id,
+            file_count=existing.declared_file_count,
+            total_size_bytes=existing.declared_total_size_bytes,
+            actor=actor,
+            settings=settings,
+            upload_id=existing.upload_id,
+            purpose="admin_daily_satellite",
+        )
+        return AgentSourcePackageOpenResponse(
+            package_id=existing.package_id,
+            upload_id=grant.upload_id,
+            pathname_prefix=grant.pathname_prefix,
+            upload_grant=grant.token,
+            expires_at=grant.expires_at,
+            maximum_file_size_bytes=settings.agent_source_package_max_file_bytes,
+            allowed_content_types=list(ALLOWED_DAILY_SATELLITE_CONTENT_TYPES),
+        )
+
+    package_id = new_prefixed_id("SP")
+    grant = create_source_blob_upload_grant(
+        package_id=package_id,
+        file_count=payload.file_count,
+        total_size_bytes=payload.total_size_bytes,
+        actor=actor,
+        settings=settings,
+        purpose="admin_daily_satellite",
+    )
+    now = utcnow()
+    package = AgentSourcePackage(
+        package_id=package_id,
+        incident_id=incident.id,
+        episode_id=episode.id,
+        analysis_window_id=active.window.id,
+        package_kind=AgentSourcePackageKind.ADMIN_SATELLITE,
+        state=AgentSourcePackageState.OPEN,
+        upload_id=grant.upload_id,
+        pathname_prefix=grant.pathname_prefix,
+        declared_file_count=payload.file_count,
+        declared_total_size_bytes=payload.total_size_bytes,
+        known_start_date=active.window.local_date,
+        known_end_date=active.window.local_date,
+        location_hint=None,
+        analysis_authorized=True,
+        publication_authorized=False,
+        terms_version=_ADMIN_SATELLITE_TERMS_VERSION,
+        consent_evidence_sha256=hashlib.sha256(
+            f"{actor.actor_id}\0{package_id}\0{request_hash}\0admin-satellite".encode()
+        ).hexdigest(),
+        consent_scopes=["temporary_storage", "agent_analysis", "human_review"],
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        trace_id=trace_id,
+        purge_after=now + timedelta(days=settings.agent_source_package_retention_days),
+    )
+    session.add(package)
+    record_operator_audit(
+        session,
+        actor=actor,
+        action="agent.daily_satellite_package_opened",
+        target_type="agent_source_package",
+        target_id=package_id,
+        reason="Daily institutional satellite transfer opened for the active window.",
+        trace_id=trace_id,
+        after={
+            "fire_id": fire_id,
+            "analysis_window_id": active.window.analysis_id,
+            "file_count": payload.file_count,
+            "publication_authorized": False,
+        },
+    )
+    session.commit()
+    return AgentSourcePackageOpenResponse(
+        package_id=package_id,
+        upload_id=grant.upload_id,
+        pathname_prefix=grant.pathname_prefix,
+        upload_grant=grant.token,
+        expires_at=grant.expires_at,
+        maximum_file_size_bytes=settings.agent_source_package_max_file_bytes,
+        allowed_content_types=list(ALLOWED_DAILY_SATELLITE_CONTENT_TYPES),
     )
 
 
@@ -366,6 +535,105 @@ def _image_metadata(content: bytes) -> tuple[datetime | None, dict[str, object]]
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise BadRequestError(
             "source_image_invalid", "An uploaded image cannot be decoded safely."
+        ) from exc
+
+
+def _geotiff_metadata(
+    content: bytes,
+    *,
+    declared_bands: list[str],
+    declared_bbox_wgs84: tuple[float, float, float, float],
+) -> dict[str, object]:
+    try:
+        with TiffFile(BytesIO(content)) as tiff:
+            if len(tiff.pages) != 1:
+                raise ValueError("GeoTIFF must expose exactly one raster image")
+            page = cast(Any, tiff.pages[0])
+            width = int(page.imagewidth)
+            height = int(page.imagelength)
+            samples_per_pixel = int(page.samplesperpixel)
+            pixel_scale_tag = page.tags.get("ModelPixelScaleTag")
+            tiepoint_tag = page.tags.get("ModelTiepointTag")
+            geo_key_tag = page.tags.get("GeoKeyDirectoryTag")
+            metadata_tag = page.tags.get("GDAL_METADATA")
+            if (
+                width <= 0
+                or height <= 0
+                or samples_per_pixel != len(declared_bands)
+                or pixel_scale_tag is None
+                or tiepoint_tag is None
+                or geo_key_tag is None
+            ):
+                raise ValueError("GeoTIFF dimensions, bands or georeferencing are invalid")
+            pixel_scale = tuple(float(value) for value in pixel_scale_tag.value)
+            tiepoint = tuple(float(value) for value in tiepoint_tag.value)
+            geo_keys = tuple(int(value) for value in geo_key_tag.value)
+            if (
+                len(pixel_scale) < 2
+                or len(tiepoint) < 6
+                or pixel_scale[0] <= 0
+                or pixel_scale[1] <= 0
+                or len(geo_keys) < 4
+                or (len(geo_keys) - 4) % 4 != 0
+            ):
+                raise ValueError("GeoTIFF georeferencing tags are invalid")
+            epsg = None
+            for offset in range(4, len(geo_keys), 4):
+                key_id, location, count, value = geo_keys[offset : offset + 4]
+                if key_id == 2048 and location == 0 and count == 1:
+                    epsg = value
+                    break
+            if epsg != 4326:
+                raise ValueError("GeoTIFF must declare EPSG:4326")
+
+            scale_x, scale_y = pixel_scale[:2]
+            origin_x = tiepoint[3] - tiepoint[0] * scale_x
+            origin_y = tiepoint[4] + tiepoint[1] * scale_y
+            actual_bbox = (
+                origin_x,
+                origin_y - height * scale_y,
+                origin_x + width * scale_x,
+                origin_y,
+            )
+            tolerance = max(scale_x, scale_y) * 1.1
+            if any(
+                abs(actual - declared) > tolerance
+                for actual, declared in zip(
+                    actual_bbox,
+                    declared_bbox_wgs84,
+                    strict=True,
+                )
+            ):
+                raise ValueError("GeoTIFF georeferencing differs from the declared bbox")
+
+            if tuple(declared_bands) == _CANONICAL_BURNED_AREA_BANDS:
+                raw_metadata = "" if metadata_tag is None else str(metadata_tag.value)
+                match = _BAND_ORDER_TAG.search(raw_metadata[:16_384])
+                if match is None or tuple(match.group(1).split(",")) != (
+                    _CANONICAL_BURNED_AREA_BANDS
+                ):
+                    raise ValueError("GeoTIFF canonical band order is not embedded")
+
+            return {
+                "image_width_px": width,
+                "image_height_px": height,
+                "image_format": "TIFF",
+                "samples_per_pixel": samples_per_pixel,
+                "crs": "EPSG:4326",
+                "geotransform": [
+                    origin_x,
+                    scale_x,
+                    0.0,
+                    origin_y,
+                    0.0,
+                    -scale_y,
+                ],
+                "bbox_wgs84": list(actual_bbox),
+            }
+    except (TiffFileError, OSError, TypeError, ValueError) as exc:
+        raise BadRequestError(
+            "daily_satellite_geotiff_invalid",
+            "The uploaded GeoTIFF does not match its signed geospatial contract.",
         ) from exc
 
 
@@ -558,6 +826,439 @@ def _create_media_batches(
                 package_item.agent_media_item_id = media_item.id
 
 
+def _daily_satellite_inventory(
+    package: AgentSourcePackage,
+    settings: Settings,
+) -> tuple[ObjectStore, list[ObjectMetadata]]:
+    store = build_object_store(settings)
+    key = f"source-packages/{package.upload_id}"
+    try:
+        inventory = store.list_prefix(key, limit=package.declared_file_count + 1)
+    except ObjectStorageError as exc:
+        raise ConflictError(
+            "source_package_inventory_unavailable", "The private upload cannot be inspected."
+        ) from exc
+    if len(inventory) != package.declared_file_count:
+        raise ConflictError(
+            "source_package_inventory_incomplete",
+            "The uploaded file count does not match the opened transfer.",
+        )
+    if sum(item.size_bytes for item in inventory) != package.declared_total_size_bytes:
+        raise ConflictError(
+            "source_package_size_mismatch",
+            "The uploaded byte count does not match the opened transfer.",
+        )
+    return store, inventory
+
+
+def _parse_daily_satellite_manifest(
+    *,
+    content: bytes,
+    expected_analysis_window_id: str,
+) -> AgentDailySatelliteManifest:
+    try:
+        raw = json.loads(content)
+        manifest = AgentDailySatelliteManifest.model_validate(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as exc:
+        raise BadRequestError(
+            "daily_satellite_manifest_invalid",
+            "The daily satellite manifest is invalid.",
+        ) from exc
+    if manifest.expected_analysis_window_id != expected_analysis_window_id:
+        raise ConflictError(
+            "agent_analysis_window_stale",
+            "The uploaded manifest does not target the active analysis window.",
+        )
+    for item in manifest.items:
+        if PurePosixPath(item.filename).name != item.filename:
+            raise BadRequestError(
+                "daily_satellite_filename_invalid",
+                "Daily satellite manifest filenames must not contain directories.",
+            )
+    return manifest
+
+
+def _validate_hotspot_geojson(content: bytes) -> str:
+    try:
+        payload = json.loads(content)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise BadRequestError(
+            "hotspot_geojson_invalid",
+            "The hotspot product is not valid UTF-8 GeoJSON.",
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("type") != "FeatureCollection":
+        raise BadRequestError(
+            "hotspot_geojson_invalid",
+            "The hotspot product must be a GeoJSON FeatureCollection.",
+        )
+    features = payload.get("features")
+    if not isinstance(features, list) or len(features) > 5_000:
+        raise BadRequestError(
+            "hotspot_geojson_invalid",
+            "The hotspot product contains an invalid number of features.",
+        )
+    for feature in features:
+        if not isinstance(feature, dict):
+            raise BadRequestError(
+                "hotspot_geojson_invalid",
+                "The hotspot product contains an invalid feature.",
+            )
+        geometry = feature.get("geometry")
+        if not isinstance(geometry, dict) or geometry.get("type") != "Point":
+            raise BadRequestError(
+                "hotspot_geojson_invalid",
+                "The hotspot product may contain only Point geometries.",
+            )
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _finalize_daily_satellite_package(
+    session: Session,
+    *,
+    package: AgentSourcePackage,
+    actor: Actor,
+    trace_id: str,
+    settings: Settings,
+) -> AgentSourcePackageResponse:
+    from fire_viewer.services.agent_validation_campaigns import (
+        batch_is_allowed_for_active_campaign,
+        require_expected_window,
+        resolve_active_analysis_window,
+    )
+
+    if package.incident is None or package.episode is None or package.analysis_window is None:
+        raise ConflictError(
+            "daily_satellite_package_unbound",
+            "The daily satellite transfer is not bound to an incident window.",
+        )
+    active = resolve_active_analysis_window(
+        session,
+        incident=package.incident,
+        episode=package.episode,
+    )
+    require_expected_window(
+        active,
+        expected_analysis_window_id=package.analysis_window.analysis_id,
+    )
+    store, inventory = _daily_satellite_inventory(package, settings)
+    by_filename = {PurePosixPath(stored.pathname).name: stored for stored in inventory}
+    if len(by_filename) != len(inventory):
+        raise BadRequestError(
+            "daily_satellite_filename_duplicate",
+            "Daily satellite upload filenames must be unique.",
+        )
+    manifest_stored = by_filename.get(_DAILY_SATELLITE_MANIFEST_NAME)
+    if manifest_stored is None:
+        raise BadRequestError(
+            "daily_satellite_manifest_missing",
+            f"The upload must include {_DAILY_SATELLITE_MANIFEST_NAME}.",
+        )
+    manifest_uri = store.uri_for_pathname(manifest_stored.pathname)
+    manifest_content = store.read_bytes(manifest_uri)
+    if len(manifest_content) != manifest_stored.size_bytes:
+        raise ConflictError(
+            "source_media_size_changed", "A private source changed during finalization."
+        )
+    manifest_sha256 = hashlib.sha256(manifest_content).hexdigest()
+    manifest = _parse_daily_satellite_manifest(
+        content=manifest_content,
+        expected_analysis_window_id=package.analysis_window.analysis_id,
+    )
+    expected_filenames = {_DAILY_SATELLITE_MANIFEST_NAME}
+    expected_filenames.update(item.filename for item in manifest.items)
+    if set(by_filename) != expected_filenames:
+        raise BadRequestError(
+            "daily_satellite_inventory_mismatch",
+            "The uploaded files do not match the daily satellite manifest.",
+        )
+    if any(
+        as_utc(item.acquired_at) > as_utc(package.analysis_window.window_end_at)
+        for item in manifest.items
+    ):
+        raise BadRequestError(
+            "daily_satellite_after_cutoff",
+            "A satellite product was acquired after the active analysis cutoff.",
+        )
+
+    package.state = AgentSourcePackageState.FINALIZING
+    manifest_package_item = AgentSourcePackageItem(
+        item_id=new_prefixed_id("SI"),
+        pathname=manifest_stored.pathname,
+        object_uri=manifest_uri,
+        original_filename=_DAILY_SATELLITE_MANIFEST_NAME,
+        content_type="application/json",
+        media_type=AgentMediaType.ARTICLE,
+        sha256=manifest_sha256,
+        size_bytes=len(manifest_content),
+        captured_at=None,
+        metadata_payload={"daily_satellite_manifest": True},
+    )
+    package.items.append(manifest_package_item)
+    reference_url = create_private_media_url(
+        source_kind="source_package_manifest",
+        source_id=package.package_id,
+        item_id=package.package_id,
+        purge_after=package.purge_after,
+        settings=settings,
+    )
+    reference_bundle = {
+        "reference_id": package.package_id,
+        "manifest_sha256": manifest_sha256,
+        "assets": [
+            {
+                "kind": "source_manifest",
+                "working_file_url": reference_url,
+                "sha256": manifest_sha256,
+                "crs": "EPSG:4326",
+                "resolution_m": None,
+            }
+        ],
+    }
+
+    prepared: list[
+        tuple[
+            AgentSourcePackageItem,
+            AgentDailySatelliteImageManifestItem | AgentDailyHotspotManifestItem,
+            str | None,
+        ]
+    ] = []
+    seen_hashes: set[str] = set()
+    for declared in manifest.items:
+        stored = by_filename[declared.filename]
+        object_uri = store.uri_for_pathname(stored.pathname)
+        content = store.read_bytes(object_uri)
+        if len(content) != stored.size_bytes:
+            raise ConflictError(
+                "source_media_size_changed", "A private source changed during finalization."
+            )
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != declared.sha256:
+            raise ConflictError(
+                "daily_satellite_hash_mismatch",
+                f"The uploaded product hash does not match the manifest: {declared.filename}.",
+            )
+        if digest in seen_hashes:
+            raise BadRequestError(
+                "daily_satellite_duplicate",
+                "The daily satellite manifest contains duplicate binary content.",
+            )
+        seen_hashes.add(digest)
+        normalized_geojson = None
+        metadata: dict[str, object]
+        if isinstance(declared, AgentDailySatelliteImageManifestItem):
+            suffix = PurePosixPath(declared.filename).suffix.casefold()
+            if suffix not in {".jpg", ".jpeg", ".png", ".tif", ".tiff"}:
+                raise BadRequestError(
+                    "daily_satellite_image_type_invalid",
+                    "Satellite image products must be JPEG, PNG, or TIFF.",
+            )
+            _validate_signature(content, suffix)
+            if (
+                tuple(declared.bands) == _CANONICAL_BURNED_AREA_BANDS
+                and suffix not in {".tif", ".tiff"}
+            ):
+                raise BadRequestError(
+                    "daily_satellite_multispectral_type_invalid",
+                    "Canonical six-band satellite products must be GeoTIFF files.",
+                )
+            if suffix in {".tif", ".tiff"}:
+                image_metadata = _geotiff_metadata(
+                    content,
+                    declared_bands=declared.bands,
+                    declared_bbox_wgs84=declared.bbox_wgs84,
+                )
+            else:
+                _captured_at, image_metadata = _image_metadata(content)
+            width_value = image_metadata["image_width_px"]
+            height_value = image_metadata["image_height_px"]
+            if not isinstance(width_value, int) or not isinstance(height_value, int):
+                raise BadRequestError(
+                    "daily_satellite_image_invalid",
+                    "The satellite image dimensions are invalid.",
+                )
+            width = width_value
+            height = height_value
+            min_lon, min_lat, max_lon, max_lat = declared.bbox_wgs84
+            geotransform = image_metadata.get(
+                "geotransform",
+                [
+                    min_lon,
+                    (max_lon - min_lon) / width,
+                    0.0,
+                    max_lat,
+                    0.0,
+                    -(max_lat - min_lat) / height,
+                ],
+            )
+            media_type = AgentMediaType.SATELLITE_IMAGE
+            content_type = {
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".tif": "image/tiff",
+                ".tiff": "image/tiff",
+            }[suffix]
+            metadata = {
+                **image_metadata,
+                "satellite": {
+                    "product_id": declared.product_id,
+                    "provider": declared.provider,
+                    "acquired_at": as_utc(declared.acquired_at).isoformat(),
+                    "crs": image_metadata.get("crs", "EPSG:4326"),
+                    "raster_width_px": width,
+                    "raster_height_px": height,
+                    "geotransform": geotransform,
+                    "bbox_wgs84": image_metadata.get(
+                        "bbox_wgs84",
+                        list(declared.bbox_wgs84),
+                    ),
+                    "resolution_m": declared.resolution_m,
+                    "bands": declared.bands,
+                    "cloud_cover_percent": declared.cloud_cover_percent,
+                },
+                "hotspot": None,
+            }
+        else:
+            if PurePosixPath(declared.filename).suffix.casefold() not in {".json", ".geojson"}:
+                raise BadRequestError(
+                    "hotspot_geojson_type_invalid",
+                    "Hotspot products must be JSON or GeoJSON.",
+                )
+            normalized_geojson = _validate_hotspot_geojson(content)
+            media_type = AgentMediaType.SATELLITE_DATA
+            content_type = "application/geo+json"
+            metadata = {
+                "satellite": None,
+                "hotspot": {
+                    "product_id": declared.product_id,
+                    "provider": declared.provider,
+                    "acquired_at": as_utc(declared.acquired_at).isoformat(),
+                    "sensor_names": declared.sensor_names,
+                    "resolution_m": declared.resolution_m,
+                    "bbox_wgs84": list(declared.bbox_wgs84),
+                },
+            }
+        package_item = AgentSourcePackageItem(
+            item_id=new_prefixed_id("SI"),
+            pathname=stored.pathname,
+            object_uri=object_uri,
+            original_filename=declared.filename,
+            content_type=content_type,
+            media_type=media_type,
+            sha256=digest,
+            size_bytes=len(content),
+            captured_at=as_utc(declared.acquired_at),
+            metadata_payload=metadata,
+        )
+        package.items.append(package_item)
+        prepared.append((package_item, declared, normalized_geojson))
+    session.flush()
+
+    for offset in range(0, len(prepared), 32):
+        chunk = prepared[offset : offset + 32]
+        batch = AgentMediaBatch(
+            batch_id=new_prefixed_id("AB"),
+            schema_version="2.0",
+            batch_type=AgentBatchType.SATELLITE_MEDIA,
+            priority=AgentBatchPriority.SCHEDULED_COMBINED,
+            state=AgentBatchState.DRAFT,
+            incident_id=package.incident_id,
+            episode_id=package.episode_id,
+            analysis_window_id=package.analysis_window_id,
+            reference_bundle_payload=reference_bundle,
+            idempotency_key=f"daily-satellite:{package.package_id}:{offset // 32}",
+            request_hash=hashlib.sha256(
+                "\n".join(item.sha256 for item, _declared, _geojson in chunk).encode()
+            ).hexdigest(),
+            trace_id=package.trace_id,
+            deadline_at=None,
+            purge_after=package.purge_after,
+        )
+        session.add(batch)
+        for package_item, declared, normalized_geojson in chunk:
+            proxy_url = create_private_media_url(
+                source_kind="source_package",
+                source_id=package.package_id,
+                item_id=package_item.item_id,
+                purge_after=package.purge_after,
+                settings=settings,
+            )
+            media_item = AgentMediaItem(
+                input_id=package_item.item_id,
+                media_type=package_item.media_type,
+                working_file_url=(
+                    proxy_url
+                    if package_item.media_type == AgentMediaType.SATELLITE_IMAGE
+                    else None
+                ),
+                media_sha256=package_item.sha256,
+                size_bytes=package_item.size_bytes,
+                metadata_payload={
+                    "provenance": {
+                        "source_key": declared.product_id,
+                        "source_reference_url": str(declared.source_reference_url),
+                        "license_identifier": declared.license_identifier,
+                        "attribution": declared.attribution,
+                        "trust": "institutional",
+                    },
+                    "captured_at": as_utc(declared.acquired_at).isoformat(),
+                    "camera": None,
+                    **package_item.metadata_payload,
+                    "private_source_package": {
+                        "package_id": package.package_id,
+                        "item_id": package_item.item_id,
+                        "object_uri": package_item.object_uri,
+                    },
+                },
+                processable_payload={
+                    "frames": [],
+                    "audio_url": None,
+                    "article_text": normalized_geojson,
+                },
+                preprocessing_status="validated",
+                purge_after=package.purge_after,
+            )
+            media_item.consent = AgentMediaConsent(
+                basis=AgentConsentBasis.INSTITUTIONAL_MANDATE,
+                state=AgentConsentState.GRANTED,
+                scopes=list(package.consent_scopes),
+                terms_version=package.terms_version,
+                evidence_sha256=package.consent_evidence_sha256,
+                subject_reference_hash=None,
+                source_reference_url=str(declared.source_reference_url),
+                license_identifier=declared.license_identifier,
+                granted_at=package.created_at,
+                expires_at=package.purge_after,
+            )
+            batch.items.append(media_item)
+            session.flush()
+            package_item.agent_media_item_id = media_item.id
+        if not batch_is_allowed_for_active_campaign(batch, active):
+            raise ConflictError(
+                "agent_campaign_media_not_allowed",
+                "The daily satellite package contains a file outside the active campaign manifest.",
+            )
+
+    package.state = AgentSourcePackageState.CONVERTED
+    package.finalized_at = utcnow()
+    record_operator_audit(
+        session,
+        actor=actor,
+        action="agent.daily_satellite_package_finalized",
+        target_type="agent_source_package",
+        target_id=package.package_id,
+        reason="Daily institutional products validated for the active analysis window.",
+        trace_id=trace_id,
+        after={
+            "analysis_window_id": package.analysis_window.analysis_id,
+            "products": len(prepared),
+            "publication_authorized": False,
+        },
+    )
+    session.commit()
+    return _package_response(_load_package(session, package.package_id))
+
+
 def finalize_source_package(
     session: Session,
     *,
@@ -572,6 +1273,14 @@ def finalize_source_package(
     if package.state != AgentSourcePackageState.OPEN:
         raise ConflictError(
             "source_package_not_open", "Only an open source package can be finalized."
+        )
+    if package.package_kind == AgentSourcePackageKind.ADMIN_SATELLITE:
+        return _finalize_daily_satellite_package(
+            session,
+            package=package,
+            actor=actor,
+            trace_id=trace_id,
+            settings=settings,
         )
     store = build_object_store(settings)
     key = f"source-packages/{package.upload_id}"
@@ -719,6 +1428,41 @@ def read_private_source_media(
         expected_hash = package_item.sha256
         content_type = package_item.content_type
         filename = package_item.original_filename
+    elif source_kind == "source_package_manifest":
+        package = session.execute(
+            select(AgentSourcePackage)
+            .where(AgentSourcePackage.package_id == source_id)
+            .options(selectinload(AgentSourcePackage.items))
+        ).scalar_one_or_none()
+        if (
+            package is None
+            or package.package_id != item_id
+            or package.package_kind != AgentSourcePackageKind.ADMIN_SATELLITE
+            or package.state != AgentSourcePackageState.CONVERTED
+            or not package.analysis_authorized
+            or as_utc(package.purge_after) <= utcnow()
+        ):
+            raise ForbiddenError("This private source manifest is no longer available.")
+        package_item = next(
+            (
+                candidate
+                for candidate in package.items
+                if candidate.original_filename == _DAILY_SATELLITE_MANIFEST_NAME
+            ),
+            None,
+        )
+        if package_item is None:
+            raise NotFoundError("private_agent_manifest", item_id)
+        content = build_object_store(settings).read_bytes(package_item.object_uri)
+        if hashlib.sha256(content).hexdigest() != package_item.sha256:
+            raise ConflictError(
+                "private_media_integrity_failed", "Private media integrity failed."
+            )
+        return PrivateMediaPayload(
+            content=content,
+            content_type=package_item.content_type,
+            filename=package_item.original_filename,
+        )
     elif source_kind == "source_research":
         candidate = session.execute(
             select(AgentSourceCandidate)

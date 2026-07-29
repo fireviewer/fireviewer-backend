@@ -19,6 +19,7 @@ from fire_viewer.domain.agent_schemas import (
     AgentBatchResponse,
     AgentConsentWithdrawRequest,
     AgentConsentWithdrawResponse,
+    AgentDailySatellitePackageOpenRequest,
     AgentDispatcherTickResponse,
     AgentOperationRunRequest,
     AgentOperationRunResponse,
@@ -27,7 +28,6 @@ from fire_viewer.domain.agent_schemas import (
     AgentSourcePackageOpenRequest,
     AgentSourcePackageOpenResponse,
     AgentSourcePackageResponse,
-    AgentSourceResearchRequest,
     AgentSourceResearchResponse,
 )
 from fire_viewer.domain.errors import ConflictError
@@ -41,12 +41,10 @@ from fire_viewer.services.agent_operations import get_agent_operations, run_agen
 from fire_viewer.services.agent_source_packages import (
     finalize_source_package,
     get_source_package,
+    open_daily_satellite_package,
     open_source_package,
 )
-from fire_viewer.services.agent_source_research import (
-    create_source_research,
-    get_source_research,
-)
+from fire_viewer.services.agent_source_research import get_source_research
 from fire_viewer.services.hosted_agent_dispatcher import process_one_hosted_dispatch
 
 router = APIRouter(prefix="/api/v2/admin/agent-batches", tags=["admin-agent-batches"])
@@ -82,6 +80,35 @@ def open_incident_source_package(
 ) -> AgentSourcePackageOpenResponse:
     _require_agent_operator(actor)
     result = open_source_package(
+        session,
+        fire_id=fire_id,
+        payload=payload,
+        idempotency_key=idempotency_key,
+        actor=actor,
+        trace_id=trace_id,
+        settings=settings,
+    )
+    _private(response)
+    return result
+
+
+@router.post(
+    "/incidents/{fire_id}/daily-inputs/satellite/open",
+    response_model=AgentSourcePackageOpenResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def open_incident_daily_satellite_package(
+    fire_id: Annotated[str, Path(pattern=r"^FR-[0-9A-Z]{2,3}-[0-9]{5}$")],
+    payload: AgentDailySatellitePackageOpenRequest,
+    response: Response,
+    actor: ActorDep,
+    session: SessionDep,
+    settings: SettingsDep,
+    trace_id: TraceIdDep,
+    idempotency_key: IdempotencyKeyDep,
+) -> AgentSourcePackageOpenResponse:
+    _require_agent_operator(actor)
+    result = open_daily_satellite_package(
         session,
         fire_id=fire_id,
         payload=payload,
@@ -131,33 +158,6 @@ def read_incident_source_package(
     _require_agent_operator(actor)
     _private(response)
     return get_source_package(session, package_id)
-
-
-@router.post(
-    "/incidents/{fire_id}/source-research",
-    response_model=AgentSourceResearchResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-def run_incident_source_research(
-    fire_id: Annotated[str, Path(pattern=r"^FR-[0-9A-Z]{2,3}-[0-9]{5}$")],
-    payload: AgentSourceResearchRequest,
-    response: Response,
-    actor: ActorDep,
-    session: SessionDep,
-    settings: SettingsDep,
-    trace_id: TraceIdDep,
-) -> AgentSourceResearchResponse:
-    _require_agent_operator(actor)
-    result = create_source_research(
-        session,
-        fire_id=fire_id,
-        payload=payload,
-        actor=actor,
-        trace_id=trace_id,
-        settings=settings,
-    )
-    _private(response)
-    return result
 
 
 @router.get(

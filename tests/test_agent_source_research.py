@@ -202,6 +202,7 @@ def test_research_uses_real_contract_cutoff_dedup_and_shared_dispatcher(
         "local_date": "2026-07-09",
         "cutoff_at": cutoff_at.isoformat(),
         "allowed_media_sha256": [media.media_sha256],
+        "expected_public_sources": ["https://example.test/die/source"],
         "required_operations": ["user_media", "source_research"],
         "declared_absences": ["satellite_media"],
     }

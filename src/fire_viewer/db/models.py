@@ -41,6 +41,7 @@ from fire_viewer.domain.enums import (
     AgentReportReviewState,
     AgentReviewState,
     AgentSourceCandidateState,
+    AgentSourcePackageKind,
     AgentSourcePackageState,
     AgentSourceResearchState,
     AgentValidationCampaignDayState,
@@ -1603,7 +1604,7 @@ class AgentValidationCampaignDay(Base, TimestampMixin):
 
 
 class AgentSourcePackage(Base, TimestampMixin):
-    """Private user-provided sources before they become normal media batches."""
+    """Private source transfer before conversion to a normal media batch."""
 
     __tablename__ = "agent_source_package"
 
@@ -1617,6 +1618,12 @@ class AgentSourcePackage(Base, TimestampMixin):
     )
     analysis_window_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_analysis_window.id", ondelete="RESTRICT"), index=True
+    )
+    package_kind: Mapped[AgentSourcePackageKind] = mapped_column(
+        enum_column(AgentSourcePackageKind, name="agent_source_package_kind"),
+        nullable=False,
+        default=AgentSourcePackageKind.USER_SOURCES,
+        index=True,
     )
     state: Mapped[AgentSourcePackageState] = mapped_column(
         enum_column(AgentSourcePackageState, name="agent_source_package_state"),

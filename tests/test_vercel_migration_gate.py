@@ -33,7 +33,7 @@ def test_migration_gate_uses_packaged_head(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    expected_revision = "e5b7c9d2a410"
+    expected_revision = "e8c4a7d2f610"
     monkeypatch.setenv("VERCEL_TARGET_ENV", "production")
     monkeypatch.setenv("FV_DATABASE_URL", "postgresql://example.invalid/fireviewer")
     monkeypatch.setenv("FV_DATABASE_SCHEMA_REVISION", expected_revision)
@@ -83,7 +83,7 @@ def test_migration_gate_rejects_stale_runtime_revision(
 
     class FakeScriptDirectory:
         def get_current_head(self) -> str:
-            return "e5b7c9d2a410"
+            return "e8c4a7d2f610"
 
     monkeypatch.setattr(
         migrate_vercel.ScriptDirectory,

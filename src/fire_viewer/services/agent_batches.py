@@ -487,6 +487,7 @@ def _worker_payload(batch: AgentMediaBatch) -> dict[str, object]:
                         "captured_at": metadata.get("captured_at"),
                         "camera": metadata.get("camera"),
                         "satellite": metadata.get("satellite"),
+                        "hotspot": metadata.get("hotspot"),
                         "frames": processable.get("frames", []),
                         "audio_url": processable.get("audio_url"),
                         "article_text": processable.get("article_text"),

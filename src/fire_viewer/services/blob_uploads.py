@@ -50,6 +50,12 @@ ALLOWED_SOURCE_CONTENT_TYPES = (
     "text/markdown",
     "text/html",
 )
+ALLOWED_DAILY_SATELLITE_CONTENT_TYPES = (
+    "application/json",
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+)
 ALLOWED_GALLERY_CONTENT_TYPES = ("image/jpeg", "image/png")
 INCIDENT_GALLERY_MAX_BYTES = 8 * 1_024 * 1_024
 _ALLOWED_SUFFIXES = frozenset(
@@ -78,6 +84,9 @@ _ALLOWED_SOURCE_SUFFIXES = frozenset(
 )
 _ALLOWED_GALLERY_SUFFIXES = frozenset({".jpg", ".png"})
 _ALLOWED_PUBLIC_CONTRIBUTION_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+_ALLOWED_DAILY_SATELLITE_SUFFIXES = frozenset(
+    {".json", ".geojson", ".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +277,10 @@ def issue_blob_client_token(
     if purpose == "source_package":
         allowed_suffixes = _ALLOWED_SOURCE_SUFFIXES
         allowed_content_types = ALLOWED_SOURCE_CONTENT_TYPES
+        maximum_size = settings.agent_source_package_max_file_bytes
+    elif purpose == "admin_daily_satellite":
+        allowed_suffixes = _ALLOWED_DAILY_SATELLITE_SUFFIXES
+        allowed_content_types = ALLOWED_DAILY_SATELLITE_CONTENT_TYPES
         maximum_size = settings.agent_source_package_max_file_bytes
     elif purpose == "public_contribution":
         allowed_suffixes = _ALLOWED_PUBLIC_CONTRIBUTION_SUFFIXES

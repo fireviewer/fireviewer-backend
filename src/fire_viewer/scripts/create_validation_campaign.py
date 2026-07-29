@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fire_viewer.core.config import get_settings
 from fire_viewer.db.engine import create_db_engine, create_session_factory
+from fire_viewer.db.models import AgentValidationCampaign
 from fire_viewer.services.agent_validation_campaigns import create_campaign_from_manifest
 
 
@@ -28,6 +29,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _campaign_summary(campaign: AgentValidationCampaign) -> dict[str, object]:
+    return {
+        "campaign_id": campaign.campaign_id,
+        "manifest_sha256": campaign.manifest_sha256,
+        "days": [
+            {
+                "ordinal": day.ordinal,
+                "fire_id": day.analysis_window.incident.fire_id,
+                "local_date": day.analysis_window.local_date.isoformat(),
+                "analysis_window_id": day.analysis_window.analysis_id,
+                "state": day.state.value,
+                "manifest_sha256": day.manifest_sha256,
+            }
+            for day in campaign.days
+        ],
+        "jobs_enqueued": 0,
+    }
+
+
 def main() -> None:
     args = build_parser().parse_args()
     settings = get_settings()
@@ -42,13 +62,7 @@ def main() -> None:
             )
             print(
                 json.dumps(
-                    {
-                        "campaign_id": campaign.campaign_id,
-                        "manifest_sha256": campaign.manifest_sha256,
-                        "days": len(campaign.days),
-                        "first_state": campaign.days[0].state.value,
-                        "jobs_enqueued": 0,
-                    },
+                    _campaign_summary(campaign),
                     sort_keys=True,
                 )
             )

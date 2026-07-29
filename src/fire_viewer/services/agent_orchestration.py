@@ -22,9 +22,10 @@ from fire_viewer.db.models import (
     Episode,
     IncidentSeries,
 )
-from fire_viewer.domain.agent_schemas import AgentSourceResearchRequest
 from fire_viewer.domain.enums import ActorType, IncidentStatus
+from fire_viewer.services.agent_source_packages import ensure_daily_analysis_window
 from fire_viewer.services.agent_source_research import create_source_research
+from fire_viewer.services.agent_validation_campaigns import active_campaign
 
 PARIS_TIMEZONE = ZoneInfo("Europe/Paris")
 MEDIA_RESEARCH_HOURS = frozenset({11, 23})
@@ -88,6 +89,10 @@ def run_public_source_schedule_once(
     local_now = current.astimezone(PARIS_TIMEZONE)
     if local_now.hour not in MEDIA_RESEARCH_HOURS:
         return 0
+    if active_campaign(session) is not None:
+        # Historical validation is driven only by the immutable campaign window.
+        # The normal current-day scheduler must not create a competing window.
+        return 0
 
     schedule_key = f"{_MEDIA_SCHEDULE_PREFIX}-{local_now.hour:02d}"
     schedule = _schedule_row(session, schedule_key=schedule_key, now=current)
@@ -124,13 +129,23 @@ def run_public_source_schedule_once(
     queued = 0
     schedule_slot = f"{local_now.date().isoformat()}T{local_now.hour:02d}:00-Europe/Paris"
     for incident in active_incidents:
+        episode = session.execute(
+            select(Episode).where(
+                Episode.incident_id == incident.id,
+                Episode.is_current.is_(True),
+            )
+        ).scalar_one()
+        window = ensure_daily_analysis_window(
+            session,
+            incident=incident,
+            episode=episode,
+            local_date=local_now.date(),
+        )
         response = create_source_research(
             session,
             fire_id=incident.fire_id,
-            payload=AgentSourceResearchRequest(
-                local_date=local_now.date(),
-                location_hint=incident.canonical_name or incident.fire_id,
-            ),
+            expected_analysis_window_id=window.analysis_id,
+            location_hint=incident.canonical_name or incident.fire_id,
             actor=actor,
             trace_id=f"scheduled-media:{schedule_slot}:{incident.fire_id}",
             settings=settings,

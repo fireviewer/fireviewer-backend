@@ -111,3 +111,25 @@ def test_media_schedule_ignores_non_media_hours(session, settings) -> None:
         )
         == 0
     )
+
+
+def test_media_schedule_stays_idle_during_internal_campaign(
+    session,
+    settings,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "fire_viewer.services.agent_orchestration.active_campaign",
+        lambda _session: object(),
+    )
+
+    assert (
+        run_public_source_schedule_once(
+            session,
+            worker_id="schedule-test",
+            settings=_research_settings(settings),
+            now=datetime(2026, 7, 27, 9, 0, tzinfo=UTC),
+        )
+        == 0
+    )
+    assert session.scalar(select(AgentSourceResearchRun)) is None

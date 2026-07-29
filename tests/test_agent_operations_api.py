@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import UTC, date, datetime
 
+import pytest
 from sqlalchemy import select
 
 from fire_viewer.db.models import (
@@ -32,6 +33,52 @@ def _canonical_sha256(payload: dict[str, object], excluded_key: str) -> str:
             sort_keys=True,
         ).encode()
     ).hexdigest()
+
+
+def test_campaign_rejects_a_day_without_any_provenance_source(
+    session, seed_incident, tmp_path
+) -> None:
+    incident, episode = seed_incident(
+        fire_id="FR-77-00001",
+        sequence=1,
+        lon=2.61,
+        lat=48.39,
+        status=IncidentStatus.ACTIVE_CONFIRMED,
+    )
+    window = ensure_daily_analysis_window(
+        session,
+        incident=incident,
+        episode=episode,
+        local_date=date(2026, 7, 12),
+    )
+    cutoff_at = window.window_end_at
+    if cutoff_at.tzinfo is None:
+        cutoff_at = cutoff_at.replace(tzinfo=UTC)
+    day: dict[str, object] = {
+        "ordinal": 1,
+        "fire_id": incident.fire_id,
+        "local_date": window.local_date.isoformat(),
+        "cutoff_at": cutoff_at.isoformat(),
+        "allowed_media_sha256": ["a" * 64],
+        "required_operations": ["source_research"],
+        "declared_absences": ["user_media", "satellite_media"],
+    }
+    day["manifest_sha256"] = _canonical_sha256(day, "manifest_sha256")
+    campaign: dict[str, object] = {
+        "schema_version": "2.0",
+        "campaign_id": "missing-provenance-source",
+        "days": [day],
+    }
+    campaign["manifest_sha256"] = _canonical_sha256(campaign, "manifest_sha256")
+    manifest_path = tmp_path / "campaign-without-source.json"
+    manifest_path.write_text(json.dumps(campaign), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="at least one unique HTTPS provenance source"):
+        create_campaign_from_manifest(
+            session,
+            manifest_path=manifest_path,
+            created_by="test-suite",
+        )
 
 
 def test_admin_runs_each_available_analysis_type_without_technical_input(
@@ -65,6 +112,7 @@ def test_admin_runs_each_available_analysis_type_without_technical_input(
         "local_date": local_date,
         "cutoff_at": cutoff_at.isoformat(),
         "allowed_media_sha256": [media.media_sha256],
+        "expected_public_sources": ["https://example.test/source"],
         "required_operations": ["user_media"],
         "declared_absences": ["satellite_media"],
     }
@@ -224,6 +272,9 @@ def test_campaign_runs_every_incident_in_the_same_calendar_slot_before_next_day(
             "local_date": window.local_date.isoformat(),
             "cutoff_at": cutoff_at.isoformat(),
             "allowed_media_sha256": [media_hash],
+            "expected_public_sources": [
+                f"https://example.test/source/{fire_id}/{window.local_date.isoformat()}"
+            ],
             "required_operations": ["source_research"],
             "declared_absences": ["user_media", "satellite_media"],
         }

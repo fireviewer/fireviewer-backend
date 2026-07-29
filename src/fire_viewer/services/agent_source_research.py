@@ -21,6 +21,7 @@ from fire_viewer.core.research_sources import research_source_policy_payload
 from fire_viewer.core.security import Actor
 from fire_viewer.core.time import as_utc, utcnow
 from fire_viewer.db.models import (
+    AgentAnalysisWindow,
     AgentMediaBatch,
     AgentMediaConsent,
     AgentMediaItem,
@@ -32,7 +33,6 @@ from fire_viewer.db.models import (
 )
 from fire_viewer.domain.agent_schemas import (
     AgentSourceCandidateResponse,
-    AgentSourceResearchRequest,
     AgentSourceResearchResponse,
     WorkerResearchInputV1,
     WorkerResearchOutputV1,
@@ -50,10 +50,7 @@ from fire_viewer.domain.enums import (
 )
 from fire_viewer.domain.errors import BadRequestError, ConflictError, NotFoundError
 from fire_viewer.domain.hashing import sha256_hex
-from fire_viewer.services.agent_source_packages import (
-    create_private_media_url,
-    ensure_daily_analysis_window,
-)
+from fire_viewer.services.agent_source_packages import create_private_media_url
 from fire_viewer.services.blob_uploads import (
     ALLOWED_SOURCE_CONTENT_TYPES,
     create_source_blob_upload_grant,
@@ -149,7 +146,8 @@ def create_source_research(
     session: Session,
     *,
     fire_id: str,
-    payload: AgentSourceResearchRequest,
+    expected_analysis_window_id: str,
+    location_hint: str | None,
     actor: Actor,
     trace_id: str,
     settings: Settings,
@@ -161,14 +159,20 @@ def create_source_research(
         raise ConflictError(
             "agent_research_storage_unavailable",
             "Public-source research requires private Vercel Blob storage.",
-        )
-    incident, episode = _incident_episode(session, fire_id)
-    window = ensure_daily_analysis_window(
-        session,
-        incident=incident,
-        episode=episode,
-        local_date=payload.local_date,
     )
+    incident, episode = _incident_episode(session, fire_id)
+    window = session.execute(
+        select(AgentAnalysisWindow).where(
+            AgentAnalysisWindow.analysis_id == expected_analysis_window_id,
+            AgentAnalysisWindow.incident_id == incident.id,
+            AgentAnalysisWindow.episode_id == episode.id,
+        )
+    ).scalar_one_or_none()
+    if window is None:
+        raise ConflictError(
+            "agent_analysis_window_mismatch",
+            "The requested analysis window is not the active incident window.",
+        )
     active = session.execute(
         select(AgentSourceResearchRun).where(
             AgentSourceResearchRun.analysis_window_id == window.id,
@@ -196,14 +200,14 @@ def create_source_research(
         analysis_window_id=window.id,
         state=AgentSourceResearchState.QUEUED,
         cutoff_at=as_utc(window.window_end_at),
-        location_hint=payload.location_hint,
+        location_hint=location_hint,
         requested_by=actor.actor_id,
         source_registry_version=settings.agent_research_source_registry_version,
         upload_id=upload_id,
         pathname_prefix=pathname_prefix,
         query_plan={
             "incident_name": incident.canonical_name,
-            "location_hint": payload.location_hint,
+            "location_hint": location_hint,
             "include_daily_municipal_updates": True,
             **dict(query_plan_overrides or {}),
         },
@@ -240,7 +244,7 @@ def create_source_research(
         trace_id=trace_id,
         after={
             "fire_id": fire_id,
-            "local_date": payload.local_date.isoformat(),
+            "local_date": window.local_date.isoformat(),
             "cutoff_at": as_utc(window.window_end_at).isoformat(),
         },
     )

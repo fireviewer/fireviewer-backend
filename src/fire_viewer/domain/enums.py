@@ -178,6 +178,7 @@ class AgentMediaType(StrEnum):
     AUDIO = "audio"
     ARTICLE = "article"
     SATELLITE_IMAGE = "satellite_image"
+    SATELLITE_DATA = "satellite_data"
 
 
 class AgentConsentBasis(StrEnum):
@@ -248,6 +249,11 @@ class AgentSourcePackageState(StrEnum):
     CONVERTED = "CONVERTED"
     FAILED = "FAILED"
     PURGED = "PURGED"
+
+
+class AgentSourcePackageKind(StrEnum):
+    USER_SOURCES = "USER_SOURCES"
+    ADMIN_SATELLITE = "ADMIN_SATELLITE"
 
 
 class AgentSourceResearchState(StrEnum):
