@@ -18012,6 +18012,265 @@
         ],
         "title": "PublicActiveFireZone"
       },
+      "PublicAgentEvidenceReference": {
+        "properties": {
+          "evidence_kind": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Evidence Kind"
+          },
+          "evidence_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Evidence Id"
+          },
+          "source_annotation_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Annotation Id"
+          },
+          "source_reference_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2048,
+                "minLength": 9,
+                "pattern": "^https://"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Reference Url"
+          },
+          "license_identifier": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License Identifier"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "evidence_kind",
+          "evidence_id"
+        ],
+        "title": "PublicAgentEvidenceReference",
+        "description": "Public provenance for one reviewed agent result, without private media access."
+      },
+      "PublicAgentFact": {
+        "properties": {
+          "fact_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Fact Id"
+          },
+          "category": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Category"
+          },
+          "fact_key": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Fact Key"
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time",
+            "title": "As Of"
+          },
+          "certainty": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Certainty"
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Summary"
+          },
+          "value_number": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Number"
+          },
+          "value_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Text"
+          },
+          "value_boolean": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Boolean"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/PublicAgentEvidenceReference"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "fact_id",
+          "category",
+          "fact_key",
+          "as_of",
+          "certainty",
+          "summary",
+          "evidence"
+        ],
+        "title": "PublicAgentFact"
+      },
+      "PublicAgentSituationReport": {
+        "properties": {
+          "report_revision_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Report Revision Id"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Revision"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "body_markdown": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Body Markdown"
+          },
+          "reviewed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Reviewed At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "report_revision_id",
+          "revision",
+          "title",
+          "body_markdown",
+          "reviewed_at"
+        ],
+        "title": "PublicAgentSituationReport"
+      },
+      "PublicAgentSpatialResult": {
+        "properties": {
+          "proposal_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Proposal Id"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "active_fire_point",
+              "smoke_origin_point",
+              "visible_fire_front",
+              "probable_activity_envelope",
+              "burned_area_polygon"
+            ],
+            "title": "Kind"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Observed At"
+          },
+          "geometry_geojson": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Geometry Geojson"
+          },
+          "geometry_origin": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Geometry Origin"
+          },
+          "horizontal_accuracy_m": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Horizontal Accuracy M"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/PublicAgentEvidenceReference"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "proposal_id",
+          "kind",
+          "observed_at",
+          "geometry_geojson",
+          "geometry_origin",
+          "horizontal_accuracy_m",
+          "evidence"
+        ],
+        "title": "PublicAgentSpatialResult"
+      },
       "PublicContributionConsents": {
         "properties": {
           "private_analysis": {
@@ -18500,6 +18759,62 @@
           "allowed_content_types"
         ],
         "title": "PublicContributionUploadGrant"
+      },
+      "PublicDailyIntelligence": {
+        "properties": {
+          "analysis_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Analysis Id"
+          },
+          "episode_id": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Episode Id"
+          },
+          "local_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Local Date"
+          },
+          "published_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Published At"
+          },
+          "report": {
+            "$ref": "#/components/schemas/PublicAgentSituationReport"
+          },
+          "facts": {
+            "items": {
+              "$ref": "#/components/schemas/PublicAgentFact"
+            },
+            "type": "array",
+            "maxItems": 2000,
+            "title": "Facts"
+          },
+          "spatial_results": {
+            "items": {
+              "$ref": "#/components/schemas/PublicAgentSpatialResult"
+            },
+            "type": "array",
+            "maxItems": 2000,
+            "title": "Spatial Results"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "analysis_id",
+          "episode_id",
+          "local_date",
+          "published_at",
+          "report"
+        ],
+        "title": "PublicDailyIntelligence",
+        "description": "Reviewed agent output exposed only after the campaign day is published."
       },
       "PublicDownload": {
         "properties": {
@@ -19065,6 +19380,14 @@
                 "type": "null"
               }
             ]
+          },
+          "daily_intelligence": {
+            "items": {
+              "$ref": "#/components/schemas/PublicDailyIntelligence"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Daily Intelligence"
           },
           "map_gallery": {
             "items": {

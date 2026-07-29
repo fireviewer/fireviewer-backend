@@ -438,6 +438,68 @@ class PublicIncidentMapCapture(StrictModel):
     height_px: int = Field(ge=360)
 
 
+class PublicAgentEvidenceReference(StrictModel):
+    """Public provenance for one reviewed agent result, without private media access."""
+
+    evidence_kind: str = Field(min_length=1, max_length=32)
+    evidence_id: str = Field(min_length=1, max_length=128)
+    source_annotation_id: str | None = Field(default=None, max_length=128)
+    source_reference_url: str | None = Field(
+        default=None, min_length=9, max_length=2048, pattern=r"^https://"
+    )
+    license_identifier: str | None = Field(default=None, max_length=128)
+
+
+class PublicAgentFact(StrictModel):
+    fact_id: str = Field(min_length=1, max_length=128)
+    category: str = Field(min_length=1, max_length=64)
+    fact_key: str = Field(min_length=1, max_length=128)
+    as_of: datetime
+    certainty: str = Field(min_length=1, max_length=32)
+    summary: str = Field(min_length=1, max_length=1000)
+    value_number: float | None = None
+    value_text: str | None = None
+    value_boolean: bool | None = None
+    unit: str | None = Field(default=None, max_length=64)
+    evidence: PublicAgentEvidenceReference
+
+
+class PublicAgentSpatialResult(StrictModel):
+    proposal_id: str = Field(min_length=1, max_length=128)
+    kind: Literal[
+        "active_fire_point",
+        "smoke_origin_point",
+        "visible_fire_front",
+        "probable_activity_envelope",
+        "burned_area_polygon",
+    ]
+    observed_at: datetime
+    geometry_geojson: dict[str, object]
+    geometry_origin: str = Field(min_length=1, max_length=64)
+    horizontal_accuracy_m: float = Field(gt=0)
+    evidence: PublicAgentEvidenceReference
+
+
+class PublicAgentSituationReport(StrictModel):
+    report_revision_id: str = Field(min_length=1, max_length=128)
+    revision: int = Field(ge=1)
+    title: str = Field(min_length=1, max_length=255)
+    body_markdown: str = Field(min_length=1)
+    reviewed_at: datetime
+
+
+class PublicDailyIntelligence(StrictModel):
+    """Reviewed agent output exposed only after the campaign day is published."""
+
+    analysis_id: str = Field(min_length=1, max_length=128)
+    episode_id: str = Field(min_length=1, max_length=16)
+    local_date: date
+    published_at: datetime
+    report: PublicAgentSituationReport
+    facts: list[PublicAgentFact] = Field(default_factory=list, max_length=2_000)
+    spatial_results: list[PublicAgentSpatialResult] = Field(default_factory=list, max_length=2_000)
+
+
 class PublicIncidentView(StrictModel):
     schema_version: Literal["1.0"] = "1.0"
     fire_id: str
@@ -457,6 +519,7 @@ class PublicIncidentView(StrictModel):
     observations: list[PublicObservationSummary] = Field(default_factory=list)
     evidence_projections: list[PublicEvidenceProjection] = Field(default_factory=list)
     active_fire_zone: PublicActiveFireZone | None = None
+    daily_intelligence: list[PublicDailyIntelligence] = Field(default_factory=list, max_length=500)
     map_gallery: list[PublicIncidentMapCapture] = Field(default_factory=list, max_length=1_000)
     gallery: list[PublicIncidentGalleryItem] = Field(default_factory=list, max_length=120)
     official_resources: list[PublicOfficialResource] = Field(default_factory=list, max_length=80)

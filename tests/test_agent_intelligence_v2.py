@@ -19,6 +19,7 @@ from fire_viewer.db.models import (
     AgentSourceAnnotation,
     AgentSpatialProposal,
     AgentValidationCampaignDay,
+    IncidentMapCapture,
     IncidentSpatialMarker,
     Job,
 )
@@ -572,11 +573,26 @@ def test_campaign_creates_one_daily_consolidation_after_all_required_operations(
     campaign_day.state = AgentValidationCampaignDayState.RUNNING
     session.commit()
 
+    output = _v2_output(status="partial_failure")
+    first_item = output["items"][0]
+    assert isinstance(first_item, dict)
+    first_proposal = first_item["spatial_proposals"][0]
+    assert isinstance(first_proposal, dict)
+    first_proposal.update(
+        {
+            "status": "projected_geometry",
+            "proposal_kind": "active_fire_point",
+            "geometry_geojson": {
+                "type": "Point",
+                "coordinates": [5.369, 44.751],
+            },
+        }
+    )
     _run_to_completion(
         app,
         session,
         settings,
-        FakeRunPodV2(_v2_output(status="partial_failure")),
+        FakeRunPodV2(output),
     )
 
     session.expire_all()
@@ -601,8 +617,8 @@ def test_campaign_creates_one_daily_consolidation_after_all_required_operations(
         "states": [],
     }
     assert report.sections_payload[0]["spatial_counts"] == {
+        "active_fire_point": 1,
         "insufficient_geometry": 1,
-        "legacy_ground_point": 1,
     }
     assert len(report.fact_links) == 1
     assert zone is not None
@@ -671,12 +687,108 @@ def test_campaign_creates_one_daily_consolidation_after_all_required_operations(
     )
     assert duplicate_report_review.status_code == 409, duplicate_report_review.text
 
+    # Human review is complete, but publication is a distinct gate.  The public
+    # contract must not expose the agent report, fact, point, zone, or capture
+    # while the campaign day still waits in REVIEW.
+    private_until_publication = client.get("/api/v1/incident/FR-26-00001/public-view")
+    assert private_until_publication.status_code == 200, private_until_publication.text
+    private_payload = private_until_publication.json()
+    assert private_payload["daily_intelligence"] == []
+    assert private_payload["active_fire_zone"] is None
+    assert private_payload["map_gallery"] == []
+
+    reviewed_point = client.post(
+        (
+            "/api/v1/admin/incidents/FR-26-00001/spatial-markers/"
+            "proposal:spatial-fire-0001/review"
+        ),
+        json={
+            "action": "validate",
+            "expected_version": 1,
+            "reason": "Point actif contrôlé dans la source avant publication.",
+        },
+    )
+    assert reviewed_point.status_code == 200, reviewed_point.text
+    reviewed_zone = client.post(
+        (
+            "/api/v1/admin/incidents/FR-26-00001/active-zone-revisions/"
+            f"{zone.zone_revision_id}/review"
+        ),
+        json={
+            "action": "approve",
+            "expected_state": "DRAFT",
+            "reason": "Périmètre quotidien contrôlé avant publication publique.",
+        },
+    )
+    assert reviewed_zone.status_code == 200, reviewed_zone.text
+    assert reviewed_zone.json()["review_state"] == "READY_FOR_PUBLICATION"
+
+    session.add(
+        IncidentMapCapture(
+            capture_id="capture-daily-intelligence-public-0001",
+            incident_id=zone.incident_id,
+            episode_id=zone.episode_id,
+            active_zone_revision_id=zone.id,
+            local_date=window.local_date,
+            object_uri="private://test/daily-intelligence-public-0001.png",
+            sha256="c" * 64,
+            size_bytes=4_096,
+            media_type="image/png",
+            width_px=960,
+            height_px=540,
+            captured_at=datetime.now(UTC),
+            created_by="test-suite",
+        )
+    )
+    session.flush()
+
     from fire_viewer.services.agent_validation_campaigns import (
+        refresh_campaign_day_publication_state,
         refresh_campaign_day_review_state,
     )
 
     assert refresh_campaign_day_review_state(session, analysis_window_id=window.id) is False
+    assert refresh_campaign_day_publication_state(session, analysis_window_id=window.id) is True
+    session.commit()
     assert session.scalar(select(func.count()).select_from(AgentSituationReportRevision)) == 1
+
+    published = client.get("/api/v1/incident/FR-26-00001/public-view")
+    assert published.status_code == 200, published.text
+    published_payload = published.json()
+    assert published_payload["active_fire_zone"]["zone_revision_id"] == zone.zone_revision_id
+    assert len(published_payload["map_gallery"]) == 1
+    public_days = published_payload["daily_intelligence"]
+    assert len(public_days) == 1
+    public_day = public_days[0]
+    assert public_day["analysis_id"] == window.analysis_id
+    assert public_day["report"]["report_revision_id"] == report.report_revision_id
+    assert public_day["facts"] == [
+        {
+            "fact_id": "fact-resources-0001",
+            "category": "resources",
+            "fact_key": "teams_engaged",
+            "as_of": public_day["facts"][0]["as_of"],
+            "certainty": "explicitly_written",
+            "summary": "La source indique 120 personnes engagées.",
+            "value_number": 120.0,
+            "value_text": None,
+            "value_boolean": None,
+            "unit": "people",
+            "evidence": {
+                "evidence_kind": "article_text",
+                "evidence_id": "media-die-0001",
+                "source_annotation_id": None,
+                "source_reference_url": "https://example.test/die/source",
+                "license_identifier": "PRESS-TEST-AUTHORIZED",
+            },
+        }
+    ]
+    assert [result["kind"] for result in public_day["spatial_results"]] == [
+        "active_fire_point"
+    ]
+    serialized_public_payload = json.dumps(published_payload)
+    assert "working_file_url" not in serialized_public_payload
+    assert "https://localhost/private" not in serialized_public_payload
 
 
 def test_native_projected_point_reuses_existing_admin_spatial_review(

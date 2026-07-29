@@ -7,7 +7,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from datetime import UTC
 
-from sqlalchemy import func, inspect, select
+from sqlalchemy import func, inspect, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from fire_viewer.core.config import Settings
@@ -16,6 +16,12 @@ from fire_viewer.core.security import Actor
 from fire_viewer.core.time import as_utc, utcnow
 from fire_viewer.db.models import (
     ActiveFireZoneRevision,
+    AgentAnalysisWindow,
+    AgentFactProposal,
+    AgentMediaItem,
+    AgentSituationReportRevision,
+    AgentSpatialProposal,
+    AgentValidationCampaignDay,
     AuditEvent,
     Episode,
     IncidentBulletinEntry,
@@ -33,6 +39,10 @@ from fire_viewer.db.transactions import begin_write_transaction
 from fire_viewer.domain.enums import (
     ActiveFireZoneReviewState,
     ActorType,
+    AgentConsentState,
+    AgentProposalReviewState,
+    AgentReportReviewState,
+    AgentValidationCampaignDayState,
     EvidenceSpatialMode,
     PublicContributionState,
     PublicReportState,
@@ -46,6 +56,11 @@ from fire_viewer.domain.schemas import (
     AdminPublicReportListResponse,
     AdminPublicReportReviewRequest,
     PublicActiveFireZone,
+    PublicAgentEvidenceReference,
+    PublicAgentFact,
+    PublicAgentSituationReport,
+    PublicAgentSpatialResult,
+    PublicDailyIntelligence,
     PublicDownload,
     PublicEvidenceProjection,
     PublicIncidentGalleryItem,
@@ -181,6 +196,195 @@ def _evidence_projections(
     return projections
 
 
+def _public_agent_evidence(
+    proposal: AgentFactProposal | AgentSpatialProposal,
+) -> PublicAgentEvidenceReference:
+    media = proposal.source_media_item
+    consent = media.consent
+    annotation = proposal.source_annotation if isinstance(proposal, AgentSpatialProposal) else None
+    source_reference_url = None
+    license_identifier = None
+    if consent is not None and consent.state == AgentConsentState.GRANTED:
+        # A public source URL is provenance, not permission to republish the
+        # downloaded media. User uploads have no source URL here and therefore
+        # remain linked only inside the private review workspace.
+        source_reference_url = consent.source_reference_url
+        license_identifier = consent.license_identifier
+    return PublicAgentEvidenceReference(
+        evidence_kind=(
+            proposal.evidence_kind
+            if isinstance(proposal, AgentFactProposal)
+            else annotation.evidence_kind
+            if annotation is not None
+            else media.media_type.value
+        ),
+        evidence_id=(
+            proposal.evidence_id
+            if isinstance(proposal, AgentFactProposal)
+            else annotation.evidence_id
+            if annotation is not None
+            else proposal.proposal_id
+        ),
+        source_annotation_id=annotation.annotation_id if annotation is not None else None,
+        source_reference_url=source_reference_url,
+        license_identifier=license_identifier,
+    )
+
+
+def _public_daily_intelligence(
+    session: Session,
+    incident: IncidentSeries,
+) -> list[PublicDailyIntelligence]:
+    """Return only reviewed outputs whose campaign day crossed publication."""
+
+    days = list(
+        session.scalars(
+            select(AgentValidationCampaignDay)
+            .join(
+                AgentAnalysisWindow,
+                AgentAnalysisWindow.id == AgentValidationCampaignDay.analysis_window_id,
+            )
+            .where(
+                AgentAnalysisWindow.incident_id == incident.id,
+                AgentValidationCampaignDay.state == AgentValidationCampaignDayState.PUBLISHED,
+            )
+            .options(selectinload(AgentValidationCampaignDay.analysis_window))
+            .order_by(
+                AgentAnalysisWindow.local_date.asc(),
+                AgentValidationCampaignDay.ordinal.asc(),
+            )
+            .limit(500)
+        )
+    )
+    if not days:
+        return []
+    window_ids = [day.analysis_window_id for day in days]
+    reports = list(
+        session.scalars(
+            select(AgentSituationReportRevision)
+            .where(
+                AgentSituationReportRevision.analysis_window_id.in_(window_ids),
+                AgentSituationReportRevision.review_state == AgentReportReviewState.VALIDATED,
+            )
+            .order_by(
+                AgentSituationReportRevision.analysis_window_id.asc(),
+                AgentSituationReportRevision.revision.desc(),
+            )
+        )
+    )
+    reports_by_window: dict[int, AgentSituationReportRevision] = {}
+    for loaded_report in reports:
+        reports_by_window.setdefault(loaded_report.analysis_window_id, loaded_report)
+    facts = list(
+        session.scalars(
+            select(AgentFactProposal)
+            .where(
+                AgentFactProposal.analysis_window_id.in_(window_ids),
+                AgentFactProposal.review_state == AgentProposalReviewState.VALIDATED,
+            )
+            .options(
+                selectinload(AgentFactProposal.source_media_item).selectinload(
+                    AgentMediaItem.consent
+                )
+            )
+            .order_by(AgentFactProposal.as_of.asc(), AgentFactProposal.fact_id.asc())
+        )
+    )
+    facts_by_window: dict[int, list[AgentFactProposal]] = defaultdict(list)
+    for fact in facts:
+        facts_by_window[fact.analysis_window_id].append(fact)
+    spatial = list(
+        session.scalars(
+            select(AgentSpatialProposal)
+            .where(
+                AgentSpatialProposal.analysis_window_id.in_(window_ids),
+                AgentSpatialProposal.review_state == AgentProposalReviewState.VALIDATED,
+                AgentSpatialProposal.status == "projected_geometry",
+                AgentSpatialProposal.proposal_kind.in_(
+                    [
+                        "active_fire_point",
+                        "smoke_origin_point",
+                        "visible_fire_front",
+                        "probable_activity_envelope",
+                        "burned_area_polygon",
+                    ]
+                ),
+            )
+            .options(
+                selectinload(AgentSpatialProposal.source_media_item).selectinload(
+                    AgentMediaItem.consent
+                ),
+                selectinload(AgentSpatialProposal.source_annotation),
+            )
+            .order_by(
+                AgentSpatialProposal.observed_at.asc(),
+                AgentSpatialProposal.proposal_id.asc(),
+            )
+        )
+    )
+    spatial_by_window: dict[int, list[AgentSpatialProposal]] = defaultdict(list)
+    for proposal in spatial:
+        spatial_by_window[proposal.analysis_window_id].append(proposal)
+    episode_ids = {episode.id: episode.episode_id for episode in incident.episodes}
+    result: list[PublicDailyIntelligence] = []
+    for day in days:
+        window = day.analysis_window
+        report = reports_by_window.get(window.id)
+        if report is None or report.reviewed_at is None or day.finished_at is None:
+            # A published day must normally have both. Fail closed if a legacy
+            # or manually edited row does not satisfy the public contract.
+            continue
+        result.append(
+            PublicDailyIntelligence(
+                analysis_id=window.analysis_id,
+                episode_id=episode_ids[window.episode_id],
+                local_date=window.local_date,
+                published_at=as_utc(day.finished_at),
+                report=PublicAgentSituationReport(
+                    report_revision_id=report.report_revision_id,
+                    revision=report.revision,
+                    title=report.title,
+                    body_markdown=report.body_markdown,
+                    reviewed_at=as_utc(report.reviewed_at),
+                ),
+                facts=[
+                    PublicAgentFact(
+                        fact_id=fact.fact_id,
+                        category=fact.category,
+                        fact_key=fact.fact_key,
+                        as_of=as_utc(fact.as_of),
+                        certainty=fact.certainty,
+                        summary=fact.summary,
+                        value_number=fact.value_number,
+                        value_text=fact.value_text,
+                        value_boolean=fact.value_boolean,
+                        unit=fact.unit,
+                        evidence=_public_agent_evidence(fact),
+                    )
+                    for fact in facts_by_window[window.id]
+                ],
+                spatial_results=[
+                    PublicAgentSpatialResult(
+                        proposal_id=proposal.proposal_id,
+                        kind=proposal.proposal_kind,
+                        observed_at=as_utc(proposal.observed_at),
+                        geometry_geojson=proposal.geometry_geojson,
+                        geometry_origin=proposal.geometry_origin,
+                        horizontal_accuracy_m=proposal.horizontal_accuracy_m,
+                        evidence=_public_agent_evidence(proposal),
+                    )
+                    for proposal in spatial_by_window[window.id]
+                    if proposal.proposal_kind is not None
+                    and proposal.observed_at is not None
+                    and proposal.geometry_geojson is not None
+                    and proposal.geometry_origin is not None
+                    and proposal.horizontal_accuracy_m is not None
+                ],
+            )
+        )
+    return result
+
+
 def get_public_incident_view(
     session: Session, *, fire_id: str, settings: Settings
 ) -> PublicIncidentView:
@@ -206,6 +410,7 @@ def get_public_incident_view(
             observations=[],
             evidence_projections=[],
             active_fire_zone=None,
+            daily_intelligence=[],
             map_gallery=[],
             gallery=[],
             official_resources=[],
@@ -444,12 +649,20 @@ def get_public_incident_view(
     )
     timeline.sort(key=lambda item: item.occurred_at, reverse=True)
     model = _public_model(session, incident, settings)
+    daily_intelligence = _public_daily_intelligence(session, incident)
+    published_window_ids = select(AgentValidationCampaignDay.analysis_window_id).where(
+        AgentValidationCampaignDay.state == AgentValidationCampaignDayState.PUBLISHED
+    )
     active_zone = session.execute(
         select(ActiveFireZoneRevision)
         .where(
             ActiveFireZoneRevision.incident_id == incident.id,
             ActiveFireZoneRevision.episode_id == current.id,
             ActiveFireZoneRevision.review_state == ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
+            or_(
+                ActiveFireZoneRevision.analysis_window_id.is_(None),
+                ActiveFireZoneRevision.analysis_window_id.in_(published_window_ids),
+            ),
         )
         .order_by(ActiveFireZoneRevision.revision.desc())
         .limit(1)
@@ -466,6 +679,10 @@ def get_public_incident_view(
                 IncidentMapCapture.episode_id == current.id,
                 ActiveFireZoneRevision.review_state
                 == ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
+                or_(
+                    ActiveFireZoneRevision.analysis_window_id.is_(None),
+                    ActiveFireZoneRevision.analysis_window_id.in_(published_window_ids),
+                ),
             )
             .options(selectinload(IncidentMapCapture.active_zone_revision))
             .order_by(
@@ -532,6 +749,7 @@ def get_public_incident_view(
             if active_zone is not None
             else None
         ),
+        daily_intelligence=daily_intelligence,
         map_gallery=[
             PublicIncidentMapCapture(
                 capture_id=item.capture_id,
