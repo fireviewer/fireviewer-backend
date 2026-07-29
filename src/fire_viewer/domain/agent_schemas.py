@@ -282,21 +282,49 @@ class AgentDispatcherTickResponse(StrictAgentModel):
     processed: bool
 
 
+class AgentSourceFileDateMetadata(StrictAgentModel):
+    """Reliable, operator-supplied date evidence for one uploaded file."""
+
+    filename: str = Field(min_length=1, max_length=500)
+    effective_at: datetime
+    basis: Literal["captured_at", "observed_at", "published_at", "acquired_at"]
+
+    @model_validator(mode="after")
+    def validate_date_metadata(self) -> AgentSourceFileDateMetadata:
+        if not _is_timezone_aware(self.effective_at):
+            raise ValueError("source file date metadata must include a timezone")
+        if "/" in self.filename or "\\" in self.filename or self.filename in {".", ".."}:
+            raise ValueError("source file date metadata filenames must be basenames")
+        return self
+
+
 class AgentSourcePackageOpenRequest(StrictAgentModel):
     file_count: int = Field(gt=0, le=5_000)
     total_size_bytes: int = Field(gt=0, le=4_294_967_296)
-    known_start_date: date
+    known_start_date: date | None = None
     known_end_date: date | None = None
     location_hint: str | None = Field(default=None, min_length=2, max_length=500)
     authorize_private_analysis: Literal[True]
+    file_date_metadata: list[AgentSourceFileDateMetadata] = Field(
+        default_factory=list,
+        max_length=5_000,
+    )
 
     @model_validator(mode="after")
     def validate_period(self) -> AgentSourcePackageOpenRequest:
-        end_date = self.known_end_date or self.known_start_date
-        if end_date < self.known_start_date:
-            raise ValueError("known_end_date must not precede known_start_date")
-        if (end_date - self.known_start_date).days > 31:
-            raise ValueError("one source package may cover at most 32 days")
+        if self.known_end_date is not None and self.known_start_date is None:
+            raise ValueError("known_end_date requires known_start_date")
+        if self.known_start_date is not None:
+            end_date = self.known_end_date or self.known_start_date
+            if end_date < self.known_start_date:
+                raise ValueError("known_end_date must not precede known_start_date")
+            if (end_date - self.known_start_date).days > 31:
+                raise ValueError("one source package may cover at most 32 days")
+        if len(self.file_date_metadata) > self.file_count:
+            raise ValueError("file_date_metadata cannot exceed file_count")
+        filenames = [item.filename.casefold() for item in self.file_date_metadata]
+        if len(filenames) != len(set(filenames)):
+            raise ValueError("file_date_metadata filenames must be unique")
         return self
 
 
@@ -308,6 +336,7 @@ class AgentSourcePackageOpenResponse(StrictAgentModel):
     expires_at: datetime
     maximum_file_size_bytes: int = Field(gt=0)
     allowed_content_types: list[str]
+    already_uploaded_filenames: list[str] = Field(default_factory=list)
 
 
 class AgentDailySatellitePackageOpenRequest(StrictAgentModel):
@@ -396,8 +425,34 @@ class AgentSourcePackageItemResponse(StrictAgentModel):
     sha256: Sha256Hex
     size_bytes: int = Field(gt=0)
     captured_at: datetime | None = None
+    date_classification: Literal["CLASSIFIED", "TO_CLASSIFY"]
+    date_evidence: (
+        Literal[
+            "EXPLICIT_CAPTURED_AT",
+            "EXPLICIT_OBSERVED_AT",
+            "EXPLICIT_PUBLISHED_AT",
+            "EXPLICIT_ACQUIRED_AT",
+            "EXIF_DATETIME_ORIGINAL",
+            "EXIF_DATETIME",
+            "FILENAME_ISO_DATE",
+            "PACKAGE_SINGLE_DATE",
+            "PUBLIC_OBSERVED_AT",
+            "CONFLICTING_METADATA",
+            "LEGACY_BATCH_WINDOW",
+        ]
+        | None
+    ) = None
+    classified_local_date: date | None = None
+    analysis_window_id: SafeIdentifier | None = None
     batch_id: SafeIdentifier | None = None
     input_id: SafeIdentifier | None = None
+
+
+class AgentSourcePackageDateGroupResponse(StrictAgentModel):
+    local_date: date
+    analysis_window_id: SafeIdentifier
+    item_count: int = Field(gt=0)
+    batch_ids: list[SafeIdentifier]
 
 
 class AgentSourcePackageResponse(StrictAgentModel):
@@ -406,13 +461,17 @@ class AgentSourcePackageResponse(StrictAgentModel):
     fire_id: str | None = Field(default=None, pattern=r"^FR-[0-9A-Z]{2,3}-[0-9]{5}$")
     episode_id: SafeIdentifier | None = None
     state: AgentSourcePackageState
-    known_start_date: date
-    known_end_date: date
+    known_start_date: date | None
+    known_end_date: date | None
     location_hint: str | None
     analysis_authorized: bool
     publication_authorized: bool
     purge_after: datetime
     finalized_at: datetime | None
+    classified_item_count: int = Field(ge=0)
+    to_classify_item_count: int = Field(ge=0)
+    analysis_window_count: int = Field(ge=0)
+    date_groups: list[AgentSourcePackageDateGroupResponse]
     batch_ids: list[SafeIdentifier]
     items: list[AgentSourcePackageItemResponse]
 

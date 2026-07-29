@@ -1,0 +1,8 @@
+# Local test and editor artefacts are not deployment inputs.
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!*.example

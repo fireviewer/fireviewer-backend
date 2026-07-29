@@ -253,6 +253,7 @@ class AgentSourcePackageState(StrEnum):
 
 class AgentSourcePackageKind(StrEnum):
     USER_SOURCES = "USER_SOURCES"
+    ADMIN_SOURCES = "ADMIN_SOURCES"
     ADMIN_SATELLITE = "ADMIN_SATELLITE"
 
 

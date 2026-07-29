@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -213,6 +213,86 @@ def test_admin_runs_each_available_analysis_type_without_technical_input(
     )
     assert declared_absent.status_code == 409, declared_absent.text
     assert declared_absent.json()["type"].endswith("agent_operation_declared_absent")
+
+
+def test_historical_windows_are_independently_runnable_without_a_campaign(
+    client, settings, seed_incident, session
+) -> None:
+    _, episode = seed_incident(
+        fire_id="FR-77-00001",
+        sequence=1,
+        lon=2.61,
+        lat=48.39,
+        status=IncidentStatus.ACTIVE_CONFIRMED,
+    )
+    expected_windows: list[tuple[str, date]] = []
+    for index, local_date in enumerate(
+        (date(2026, 7, 12), date(2026, 7, 13)),
+        start=1,
+    ):
+        payload = _v2_payload(
+            fire_id="FR-77-00001",
+            episode_id=episode.episode_id,
+            batch_type="user_media",
+        )
+        analysis_id = f"fontainebleau-{local_date.isoformat()}"
+        start_at = datetime.combine(local_date, datetime.min.time(), tzinfo=UTC)
+        payload["batch_id"] = f"fontainebleau-history-batch-{index}"
+        payload["analysis_window"] = {
+            "analysis_id": analysis_id,
+            "fire_id": "FR-77-00001",
+            "episode_id": episode.episode_id,
+            "window_start_at": start_at.isoformat(),
+            "window_end_at": (start_at + timedelta(days=1)).isoformat(),
+            "local_date": local_date.isoformat(),
+            "timezone": "Europe/Paris",
+        }
+        item = payload["items"][0]
+        assert isinstance(item, dict)
+        item["input_id"] = f"fontainebleau-history-media-{index}"
+        item["media_sha256"] = f"{index:x}" * 64
+        item["captured_at"] = (start_at + timedelta(hours=12)).isoformat()
+        created = client.post(
+            "/api/v2/admin/agent-batches",
+            headers={"Idempotency-Key": f"fontainebleau-history-create-{index}"},
+            json=payload,
+        )
+        assert created.status_code == 201, created.text
+        expected_windows.append((analysis_id, local_date))
+
+    settings.agent_dispatch_enabled = True
+    overview = client.get(
+        "/api/v2/admin/agent-batches/incidents/FR-77-00001/operations"
+    )
+    assert overview.status_code == 200, overview.text
+    available_ids = {
+        item["analysis_window_id"] for item in overview.json()["available_windows"]
+    }
+    assert {analysis_id for analysis_id, _local_date in expected_windows}.issubset(
+        available_ids
+    )
+
+    for analysis_id, _local_date in expected_windows:
+        launched = client.post(
+            "/api/v2/admin/agent-batches/incidents/FR-77-00001/operations/user_media/run",
+            json={"expected_analysis_window_id": analysis_id},
+        )
+        assert launched.status_code == 200, launched.text
+        assert launched.json()["analysis_window_id"] == analysis_id
+
+    session.expire_all()
+    dispatches = list(session.scalars(select(AgentDispatch).order_by(AgentDispatch.id)))
+    assert len(dispatches) == 2
+    assert {
+        (
+            dispatch.payload["analysis_window"]["analysis_id"],
+            dispatch.payload["analysis_window"]["local_date"],
+        )
+        for dispatch in dispatches
+    } == {
+        (analysis_id, local_date.isoformat())
+        for analysis_id, local_date in expected_windows
+    }
 
 
 def test_campaign_makes_historical_windows_runnable_without_publication_gate(

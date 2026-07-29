@@ -9,6 +9,7 @@ from fire_viewer.core.config import Settings
 from fire_viewer.core.security import Actor
 from fire_viewer.core.time import as_utc, utcnow
 from fire_viewer.db.models import (
+    AgentAnalysisWindow,
     AgentMediaBatch,
     AgentMediaItem,
     AgentSourceResearchRun,
@@ -24,6 +25,7 @@ from fire_viewer.domain.agent_schemas import (
     AgentOperationWindow,
 )
 from fire_viewer.domain.enums import (
+    AgentAnalysisState,
     AgentBatchState,
     AgentBatchType,
     AgentConsentState,
@@ -312,15 +314,35 @@ def _available_operation_windows(
 
     campaign = active_campaign(session)
     if campaign is None:
-        active = resolve_active_analysis_window(session, incident=incident, episode=episode)
+        windows = list(
+            session.scalars(
+                select(AgentAnalysisWindow)
+                .where(
+                    AgentAnalysisWindow.incident_id == incident.id,
+                    AgentAnalysisWindow.episode_id == episode.id,
+                    AgentAnalysisWindow.state.not_in(
+                        [
+                            AgentAnalysisState.COMPLETED,
+                            AgentAnalysisState.CANCELLED,
+                        ]
+                    ),
+                )
+                .order_by(
+                    AgentAnalysisWindow.local_date.asc(),
+                    AgentAnalysisWindow.id.asc(),
+                )
+                .limit(1_000)
+            )
+        )
         return [
             _overview_window(
                 incident=incident,
                 episode=episode,
-                active_window=active,
+                active_window=ActiveAnalysisWindow(window=window, campaign_day=None),
                 settings=settings,
                 session=session,
             )
+            for window in windows
         ]
     days = sorted(
         (

@@ -17,14 +17,17 @@ from fire_viewer.db.models import (
     AgentMediaItem,
     AgentScheduleRun,
     AgentSourcePackage,
+    AgentSourcePackageItem,
     Job,
     PublicContributionSubmission,
 )
 from fire_viewer.domain.enums import (
     ActorType,
+    AgentAnalysisState,
     AgentBatchType,
     AgentConsentState,
 )
+from fire_viewer.services.agent_source_packages import ensure_daily_analysis_window
 from fire_viewer.services.blob_uploads import BlobUploadGrant, create_source_blob_upload_grant
 from fire_viewer.services.public_contribution_schedule import (
     run_public_contribution_schedule_once,
@@ -218,6 +221,8 @@ def test_public_incident_evidence_uses_private_user_media_and_human_review(
     assert private_view.status_code == 200, private_view.text
     assert private_view.json()["participatory_observation_count"] is None
     assert private_view.json()["participatory_published_count"] is None
+
+
     assert private_view.json()["participatory_received_count"] is None
     assert private_view.json()["gallery"] == []
 
@@ -293,6 +298,50 @@ def test_public_incident_evidence_uses_private_user_media_and_human_review(
     )
     assert tracked.status_code == 200
     assert tracked.json()["contribution"]["state"] == "ACCEPTED"
+
+
+def test_public_historical_evidence_does_not_reopen_terminal_agent_window(
+    client, session, settings, seed_incident, monkeypatch
+) -> None:
+    incident, episode = seed_incident(
+        fire_id="FR-26-00001",
+        sequence=1,
+        lon=5.37,
+        lat=44.75,
+    )
+    window = ensure_daily_analysis_window(
+        session,
+        incident=incident,
+        episode=episode,
+        local_date=datetime(2026, 7, 12, tzinfo=UTC).date(),
+    )
+    window.state = AgentAnalysisState.COMPLETED
+    session.commit()
+
+    store, content = _configure_upload(monkeypatch, settings)
+    payload = _payload(content_size=len(content))
+    payload["observation"]["observed_at"] = "2026-07-12T18:30:00+00:00"
+    opened = _open(client, payload, key="public-terminal-window-0001")
+    store.files["firewarning/source-packages/public-upload-fixed/0001-preuve.png"] = content
+
+    finalized = client.post(
+        f"/api/v1/contributions/{opened['contribution_id']}/finalize",
+        headers={"Authorization": f"Bearer {opened['tracking_token']}"},
+    )
+
+    assert finalized.status_code == 202, finalized.text
+    assert finalized.json()["contribution"]["state"] == "PENDING"
+    session.refresh(window)
+    assert window.state == AgentAnalysisState.COMPLETED
+    batch = session.scalar(select(AgentMediaBatch))
+    assert batch is not None
+    assert batch.schema_version == "1.0"
+    assert batch.analysis_window_id is None
+    package_item = session.scalar(select(AgentSourcePackageItem))
+    assert package_item is not None
+    assert package_item.classified_local_date == datetime(2026, 7, 12, tzinfo=UTC).date()
+    assert package_item.analysis_window_id is None
+    assert package_item.metadata_payload["terminal_analysis_window_unlinked"] is True
 
 
 def test_new_fire_image_creates_unassigned_v1_batch(client, session, settings, monkeypatch) -> None:

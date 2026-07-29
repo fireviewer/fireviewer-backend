@@ -16151,6 +16151,76 @@
         ],
         "title": "AgentSourceCandidateState"
       },
+      "AgentSourceFileDateMetadata": {
+        "properties": {
+          "filename": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Filename"
+          },
+          "effective_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Effective At"
+          },
+          "basis": {
+            "type": "string",
+            "enum": [
+              "captured_at",
+              "observed_at",
+              "published_at",
+              "acquired_at"
+            ],
+            "title": "Basis"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "filename",
+          "effective_at",
+          "basis"
+        ],
+        "title": "AgentSourceFileDateMetadata",
+        "description": "Reliable, operator-supplied date evidence for one uploaded file."
+      },
+      "AgentSourcePackageDateGroupResponse": {
+        "properties": {
+          "local_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Local Date"
+          },
+          "analysis_window_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "title": "Analysis Window Id"
+          },
+          "item_count": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Item Count"
+          },
+          "batch_ids": {
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "type": "array",
+            "title": "Batch Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "local_date",
+          "analysis_window_id",
+          "item_count",
+          "batch_ids"
+        ],
+        "title": "AgentSourcePackageDateGroupResponse"
+      },
       "AgentSourcePackageItemResponse": {
         "properties": {
           "item_id": {
@@ -16191,6 +16261,62 @@
             ],
             "title": "Captured At"
           },
+          "date_classification": {
+            "type": "string",
+            "enum": [
+              "CLASSIFIED",
+              "TO_CLASSIFY"
+            ],
+            "title": "Date Classification"
+          },
+          "date_evidence": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "EXPLICIT_CAPTURED_AT",
+                  "EXPLICIT_OBSERVED_AT",
+                  "EXPLICIT_PUBLISHED_AT",
+                  "EXPLICIT_ACQUIRED_AT",
+                  "EXIF_DATETIME_ORIGINAL",
+                  "EXIF_DATETIME",
+                  "FILENAME_ISO_DATE",
+                  "PACKAGE_SINGLE_DATE",
+                  "PUBLIC_OBSERVED_AT",
+                  "CONFLICTING_METADATA",
+                  "LEGACY_BATCH_WINDOW"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date Evidence"
+          },
+          "classified_local_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classified Local Date"
+          },
+          "analysis_window_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analysis Window Id"
+          },
           "batch_id": {
             "anyOf": [
               {
@@ -16224,7 +16350,8 @@
           "content_type",
           "media_type",
           "sha256",
-          "size_bytes"
+          "size_bytes",
+          "date_classification"
         ],
         "title": "AgentSourcePackageItemResponse"
       },
@@ -16232,6 +16359,7 @@
         "type": "string",
         "enum": [
           "USER_SOURCES",
+          "ADMIN_SOURCES",
           "ADMIN_SATELLITE"
         ],
         "title": "AgentSourcePackageKind"
@@ -16251,8 +16379,15 @@
             "title": "Total Size Bytes"
           },
           "known_start_date": {
-            "type": "string",
-            "format": "date",
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Known Start Date"
           },
           "known_end_date": {
@@ -16284,6 +16419,14 @@
             "type": "boolean",
             "const": true,
             "title": "Authorize Private Analysis"
+          },
+          "file_date_metadata": {
+            "items": {
+              "$ref": "#/components/schemas/AgentSourceFileDateMetadata"
+            },
+            "type": "array",
+            "maxItems": 5000,
+            "title": "File Date Metadata"
           }
         },
         "additionalProperties": false,
@@ -16291,7 +16434,6 @@
         "required": [
           "file_count",
           "total_size_bytes",
-          "known_start_date",
           "authorize_private_analysis"
         ],
         "title": "AgentSourcePackageOpenRequest"
@@ -16331,6 +16473,13 @@
             },
             "type": "array",
             "title": "Allowed Content Types"
+          },
+          "already_uploaded_filenames": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Already Uploaded Filenames"
           }
         },
         "additionalProperties": false,
@@ -16384,13 +16533,27 @@
             "$ref": "#/components/schemas/AgentSourcePackageState"
           },
           "known_start_date": {
-            "type": "string",
-            "format": "date",
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Known Start Date"
           },
           "known_end_date": {
-            "type": "string",
-            "format": "date",
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Known End Date"
           },
           "location_hint": {
@@ -16429,6 +16592,28 @@
             ],
             "title": "Finalized At"
           },
+          "classified_item_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Classified Item Count"
+          },
+          "to_classify_item_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "To Classify Item Count"
+          },
+          "analysis_window_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Analysis Window Count"
+          },
+          "date_groups": {
+            "items": {
+              "$ref": "#/components/schemas/AgentSourcePackageDateGroupResponse"
+            },
+            "type": "array",
+            "title": "Date Groups"
+          },
           "batch_ids": {
             "items": {
               "type": "string",
@@ -16458,6 +16643,10 @@
           "publication_authorized",
           "purge_after",
           "finalized_at",
+          "classified_item_count",
+          "to_classify_item_count",
+          "analysis_window_count",
+          "date_groups",
           "batch_ids",
           "items"
         ],

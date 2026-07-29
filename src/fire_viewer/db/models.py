@@ -1635,9 +1635,12 @@ class AgentSourcePackage(Base, TimestampMixin):
     pathname_prefix: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
     declared_file_count: Mapped[int] = mapped_column(Integer, nullable=False)
     declared_total_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
-    known_start_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
-    known_end_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    known_start_date: Mapped[date | None] = mapped_column(Date, index=True)
+    known_end_date: Mapped[date | None] = mapped_column(Date, index=True)
     location_hint: Mapped[str | None] = mapped_column(String(500))
+    file_date_metadata: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
     analysis_authorized: Mapped[bool] = mapped_column(Boolean, nullable=False)
     publication_authorized: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     terms_version: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -1676,7 +1679,10 @@ class AgentSourcePackage(Base, TimestampMixin):
         CheckConstraint("declared_file_count > 0", name="ck_agent_source_package_file_count"),
         CheckConstraint("declared_total_size_bytes > 0", name="ck_agent_source_package_total_size"),
         CheckConstraint(
-            "known_end_date >= known_start_date", name="ck_agent_source_package_date_order"
+            "(known_start_date IS NULL AND known_end_date IS NULL) OR "
+            "(known_start_date IS NOT NULL AND known_end_date IS NOT NULL "
+            "AND known_end_date >= known_start_date)",
+            name="ck_agent_source_package_date_order",
         ),
         CheckConstraint("analysis_authorized", name="ck_agent_source_package_analysis_authorized"),
         CheckConstraint("NOT publication_authorized", name="ck_agent_source_package_not_public"),
@@ -1722,9 +1728,18 @@ class AgentSourcePackageItem(Base, TimestampMixin):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    date_classification: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="TO_CLASSIFY", index=True
+    )
+    date_evidence: Mapped[str | None] = mapped_column(String(40))
+    classified_local_date: Mapped[date | None] = mapped_column(Date, index=True)
+    analysis_window_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_analysis_window.id", ondelete="RESTRICT"), index=True
+    )
     metadata_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
     package: Mapped[AgentSourcePackage] = relationship(back_populates="items")
+    analysis_window: Mapped[AgentAnalysisWindow | None] = relationship()
     agent_media_item: Mapped[AgentMediaItem | None] = relationship(
         foreign_keys=[agent_media_item_id]
     )
@@ -1733,6 +1748,17 @@ class AgentSourcePackageItem(Base, TimestampMixin):
         UniqueConstraint("package_id", "pathname", name="uq_agent_source_package_item_path"),
         CheckConstraint(sha256_hex_check("sha256"), name="ck_agent_source_package_item_hash"),
         CheckConstraint("size_bytes > 0", name="ck_agent_source_package_item_size"),
+        CheckConstraint(
+            "date_classification IN ('CLASSIFIED', 'TO_CLASSIFY')",
+            name="ck_agent_source_package_item_date_classification",
+        ),
+        CheckConstraint(
+            "(date_classification = 'CLASSIFIED' "
+            "AND classified_local_date IS NOT NULL AND date_evidence IS NOT NULL) OR "
+            "(date_classification = 'TO_CLASSIFY' "
+            "AND classified_local_date IS NULL AND analysis_window_id IS NULL)",
+            name="ck_agent_source_package_item_date_assignment",
+        ),
     )
 
 

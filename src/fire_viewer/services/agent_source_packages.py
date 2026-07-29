@@ -42,6 +42,8 @@ from fire_viewer.domain.agent_schemas import (
     AgentDailySatelliteImageManifestItem,
     AgentDailySatelliteManifest,
     AgentDailySatellitePackageOpenRequest,
+    AgentSourceFileDateMetadata,
+    AgentSourcePackageDateGroupResponse,
     AgentSourcePackageItemResponse,
     AgentSourcePackageOpenRequest,
     AgentSourcePackageOpenResponse,
@@ -86,6 +88,7 @@ _CANONICAL_BURNED_AREA_BANDS = (
 _BAND_ORDER_TAG = re.compile(
     r'<Item name="FIREVIEWER_BAND_ORDER">([^<]{1,512})</Item>'
 )
+_ISO_DATE_IN_FILENAME = re.compile(r"(?<![0-9])([12][0-9]{3}-[0-9]{2}-[0-9]{2})(?![0-9])")
 _SUFFIX_MEDIA: dict[str, tuple[AgentMediaType, str]] = {
     ".jpg": (AgentMediaType.IMAGE, "image/jpeg"),
     ".jpeg": (AgentMediaType.IMAGE, "image/jpeg"),
@@ -139,6 +142,22 @@ def _incident_episode(session: Session, fire_id: str) -> tuple[IncidentSeries, E
     return incident, episode
 
 
+def _daily_analysis_window(
+    session: Session,
+    *,
+    incident: IncidentSeries,
+    episode: Episode,
+    local_date: date,
+) -> AgentAnalysisWindow | None:
+    return session.execute(
+        select(AgentAnalysisWindow).where(
+            AgentAnalysisWindow.incident_id == incident.id,
+            AgentAnalysisWindow.episode_id == episode.id,
+            AgentAnalysisWindow.local_date == local_date,
+        )
+    ).scalar_one_or_none()
+
+
 def ensure_daily_analysis_window(
     session: Session,
     *,
@@ -146,14 +165,21 @@ def ensure_daily_analysis_window(
     episode: Episode,
     local_date: date,
 ) -> AgentAnalysisWindow:
-    existing = session.execute(
-        select(AgentAnalysisWindow).where(
-            AgentAnalysisWindow.incident_id == incident.id,
-            AgentAnalysisWindow.episode_id == episode.id,
-            AgentAnalysisWindow.local_date == local_date,
-        )
-    ).scalar_one_or_none()
+    existing = _daily_analysis_window(
+        session,
+        incident=incident,
+        episode=episode,
+        local_date=local_date,
+    )
     if existing is not None:
+        if existing.state in {
+            AgentAnalysisState.COMPLETED,
+            AgentAnalysisState.CANCELLED,
+        }:
+            raise ConflictError(
+                "agent_analysis_window_terminal",
+                "A completed or cancelled analysis window cannot accept new sources.",
+            )
         return existing
     start_local = datetime.combine(local_date, time.min, tzinfo=_TIMEZONE)
     end_local = datetime.combine(local_date + timedelta(days=1), time.min, tzinfo=_TIMEZONE)
@@ -182,6 +208,9 @@ def _load_package(session: Session, package_id: str) -> AgentSourcePackage:
             selectinload(AgentSourcePackage.episode),
             selectinload(AgentSourcePackage.analysis_window),
             selectinload(AgentSourcePackage.public_contribution),
+            selectinload(AgentSourcePackage.items).selectinload(
+                AgentSourcePackageItem.analysis_window
+            ),
             selectinload(AgentSourcePackage.items)
             .selectinload(AgentSourcePackageItem.agent_media_item)
             .selectinload(AgentMediaItem.batch),
@@ -200,6 +229,43 @@ def _package_response(package: AgentSourcePackage) -> AgentSourcePackageResponse
             if item.agent_media_item is not None
         }
     )
+    date_groups: list[AgentSourcePackageDateGroupResponse] = []
+    grouped_items: dict[int, list[AgentSourcePackageItem]] = {}
+    for item in package.items:
+        if item.analysis_window_id is not None:
+            grouped_items.setdefault(item.analysis_window_id, []).append(item)
+    for _window_id, items in sorted(
+        grouped_items.items(),
+        key=lambda entry: (
+            entry[1][0].analysis_window.local_date
+            if entry[1][0].analysis_window is not None
+            else date.max
+        ),
+    ):
+        window = items[0].analysis_window
+        if window is None:
+            continue
+        group_batch_ids = sorted(
+            {
+                item.agent_media_item.batch.batch_id
+                for item in items
+                if item.agent_media_item is not None
+            }
+        )
+        date_groups.append(
+            AgentSourcePackageDateGroupResponse(
+                local_date=window.local_date,
+                analysis_window_id=window.analysis_id,
+                item_count=len(items),
+                batch_ids=group_batch_ids,
+            )
+        )
+    classified_item_count = sum(
+        item.date_classification == "CLASSIFIED" for item in package.items
+    )
+    to_classify_item_count = sum(
+        item.date_classification == "TO_CLASSIFY" for item in package.items
+    )
     return AgentSourcePackageResponse(
         package_id=package.package_id,
         package_kind=package.package_kind,
@@ -213,6 +279,10 @@ def _package_response(package: AgentSourcePackage) -> AgentSourcePackageResponse
         publication_authorized=package.publication_authorized,
         purge_after=as_utc(package.purge_after),
         finalized_at=as_utc(package.finalized_at) if package.finalized_at else None,
+        classified_item_count=classified_item_count,
+        to_classify_item_count=to_classify_item_count,
+        analysis_window_count=len(date_groups),
+        date_groups=date_groups,
         batch_ids=batch_ids,
         items=[
             AgentSourcePackageItemResponse(
@@ -223,12 +293,57 @@ def _package_response(package: AgentSourcePackage) -> AgentSourcePackageResponse
                 sha256=item.sha256,
                 size_bytes=item.size_bytes,
                 captured_at=as_utc(item.captured_at) if item.captured_at else None,
+                date_classification=item.date_classification,
+                date_evidence=item.date_evidence,
+                classified_local_date=item.classified_local_date,
+                analysis_window_id=(
+                    item.analysis_window.analysis_id
+                    if item.analysis_window is not None
+                    else None
+                ),
                 batch_id=(item.agent_media_item.batch.batch_id if item.agent_media_item else None),
                 input_id=item.agent_media_item.input_id if item.agent_media_item else None,
             )
             for item in package.items
         ],
     )
+
+
+def _resumable_package_filenames(
+    package: AgentSourcePackage,
+    *,
+    settings: Settings,
+) -> list[str]:
+    if package.state != AgentSourcePackageState.OPEN:
+        raise ConflictError(
+            "source_package_already_finalized",
+            "A finalized source package cannot issue another upload grant.",
+        )
+    try:
+        inventory = build_object_store(settings).list_prefix(
+            f"source-packages/{package.upload_id}",
+            limit=package.declared_file_count + 1,
+        )
+    except ObjectStorageError as exc:
+        raise ConflictError(
+            "source_package_inventory_unavailable",
+            "The private upload cannot be inspected before resuming it.",
+        ) from exc
+    if (
+        len(inventory) > package.declared_file_count
+        or sum(item.size_bytes for item in inventory) > package.declared_total_size_bytes
+    ):
+        raise ConflictError(
+            "source_package_inventory_invalid",
+            "The partial private upload exceeds its opened transfer contract.",
+        )
+    filenames = sorted(PurePosixPath(item.pathname).name for item in inventory)
+    if len(filenames) != len(set(filenames)):
+        raise ConflictError(
+            "source_package_inventory_ambiguous",
+            "The partial private upload contains duplicate basenames.",
+        )
+    return filenames
 
 
 def open_source_package(
@@ -265,6 +380,10 @@ def open_source_package(
                 "source_package_idempotency_conflict",
                 "The idempotency key was already used for another source package.",
             )
+        already_uploaded_filenames = _resumable_package_filenames(
+            existing,
+            settings=settings,
+        )
         grant = create_source_blob_upload_grant(
             package_id=existing.package_id,
             file_count=existing.declared_file_count,
@@ -281,6 +400,7 @@ def open_source_package(
             expires_at=grant.expires_at,
             maximum_file_size_bytes=settings.agent_source_package_max_file_bytes,
             allowed_content_types=list(ALLOWED_SOURCE_CONTENT_TYPES),
+            already_uploaded_filenames=already_uploaded_filenames,
         )
 
     package_id = new_prefixed_id("SP")
@@ -292,13 +412,15 @@ def open_source_package(
         settings=settings,
     )
     now = utcnow()
-    end_date = payload.known_end_date or payload.known_start_date
+    end_date = None
+    if payload.known_start_date is not None:
+        end_date = payload.known_end_date or payload.known_start_date
     package = AgentSourcePackage(
         package_id=package_id,
         incident_id=incident.id,
         episode_id=episode.id,
         analysis_window_id=None,
-        package_kind=AgentSourcePackageKind.USER_SOURCES,
+        package_kind=AgentSourcePackageKind.ADMIN_SOURCES,
         state=AgentSourcePackageState.OPEN,
         upload_id=grant.upload_id,
         pathname_prefix=grant.pathname_prefix,
@@ -307,6 +429,9 @@ def open_source_package(
         known_start_date=payload.known_start_date,
         known_end_date=end_date,
         location_hint=payload.location_hint,
+        file_date_metadata=[
+            item.model_dump(mode="json") for item in payload.file_date_metadata
+        ],
         analysis_authorized=True,
         publication_authorized=False,
         terms_version=_TERMS_VERSION,
@@ -330,6 +455,7 @@ def open_source_package(
         after={
             "fire_id": fire_id,
             "file_count": payload.file_count,
+            "explicitly_dated_files": len(payload.file_date_metadata),
             "publication_authorized": False,
         },
     )
@@ -404,6 +530,10 @@ def open_daily_satellite_package(
                 "source_package_idempotency_conflict",
                 "The idempotency key was already used for another source package.",
             )
+        already_uploaded_filenames = _resumable_package_filenames(
+            existing,
+            settings=settings,
+        )
         grant = create_source_blob_upload_grant(
             package_id=existing.package_id,
             file_count=existing.declared_file_count,
@@ -421,6 +551,7 @@ def open_daily_satellite_package(
             expires_at=grant.expires_at,
             maximum_file_size_bytes=settings.agent_source_package_max_file_bytes,
             allowed_content_types=list(ALLOWED_DAILY_SATELLITE_CONTENT_TYPES),
+            already_uploaded_filenames=already_uploaded_filenames,
         )
 
     package_id = new_prefixed_id("SP")
@@ -523,11 +654,19 @@ def _image_metadata(content: bytes) -> tuple[datetime | None, dict[str, object]]
                 "image_format": image.format,
             }
             captured_at = None
-            raw_date = image.getexif().get(36867) or image.getexif().get(306)
+            exif = image.getexif()
+            raw_original_date = exif.get(36867)
+            raw_general_date = exif.get(306)
+            raw_date = raw_original_date or raw_general_date
             if isinstance(raw_date, str):
                 try:
                     captured_at = datetime.strptime(raw_date, "%Y:%m:%d %H:%M:%S").replace(
                         tzinfo=_TIMEZONE
+                    )
+                    metadata["date_evidence"] = (
+                        "EXIF_DATETIME_ORIGINAL"
+                        if raw_original_date
+                        else "EXIF_DATETIME"
                     )
                 except ValueError:
                     metadata["unparsed_capture_date"] = raw_date[:128]
@@ -542,7 +681,7 @@ def _geotiff_metadata(
     content: bytes,
     *,
     declared_bands: list[str],
-    declared_bbox_wgs84: tuple[float, float, float, float],
+    declared_bbox_wgs84: tuple[float, float, float, float] | None,
 ) -> dict[str, object]:
     try:
         with TiffFile(BytesIO(content)) as tiff:
@@ -595,16 +734,17 @@ def _geotiff_metadata(
                 origin_x + width * scale_x,
                 origin_y,
             )
-            tolerance = max(scale_x, scale_y) * 1.1
-            if any(
-                abs(actual - declared) > tolerance
-                for actual, declared in zip(
-                    actual_bbox,
-                    declared_bbox_wgs84,
-                    strict=True,
-                )
-            ):
-                raise ValueError("GeoTIFF georeferencing differs from the declared bbox")
+            if declared_bbox_wgs84 is not None:
+                tolerance = max(scale_x, scale_y) * 1.1
+                if any(
+                    abs(actual - declared) > tolerance
+                    for actual, declared in zip(
+                        actual_bbox,
+                        declared_bbox_wgs84,
+                        strict=True,
+                    )
+                ):
+                    raise ValueError("GeoTIFF georeferencing differs from the declared bbox")
 
             if tuple(declared_bands) == _CANONICAL_BURNED_AREA_BANDS:
                 raw_metadata = "" if metadata_tag is None else str(metadata_tag.value)
@@ -637,6 +777,16 @@ def _geotiff_metadata(
         ) from exc
 
 
+def _tiff_samples_per_pixel(content: bytes) -> int:
+    try:
+        with TiffFile(BytesIO(content)) as tiff:
+            if len(tiff.pages) != 1:
+                return 0
+            return int(cast(Any, tiff.pages[0]).samplesperpixel)
+    except (TiffFileError, OSError, TypeError, ValueError):
+        return 0
+
+
 def _article_text(content: bytes, content_type: str) -> str:
     text = content.decode("utf-8", errors="replace")
     if content_type == "text/html":
@@ -644,6 +794,100 @@ def _article_text(content: bytes, content_type: str) -> str:
         parser.feed(text)
         text = "\n".join(parser.parts)
     return text[:100_000]
+
+
+_EXPLICIT_DATE_EVIDENCE = {
+    "captured_at": "EXPLICIT_CAPTURED_AT",
+    "observed_at": "EXPLICIT_OBSERVED_AT",
+    "published_at": "EXPLICIT_PUBLISHED_AT",
+    "acquired_at": "EXPLICIT_ACQUIRED_AT",
+}
+
+
+def _file_date_metadata(
+    package: AgentSourcePackage,
+) -> dict[str, AgentSourceFileDateMetadata]:
+    declarations: dict[str, AgentSourceFileDateMetadata] = {}
+    for raw in package.file_date_metadata:
+        try:
+            declaration = AgentSourceFileDateMetadata.model_validate(raw)
+        except ValidationError as exc:
+            raise ConflictError(
+                "source_file_date_metadata_invalid",
+                "Persisted source file date metadata is invalid.",
+            ) from exc
+        declarations[declaration.filename.casefold()] = declaration
+    return declarations
+
+
+def _resolve_admin_item_date(
+    *,
+    package: AgentSourcePackage,
+    package_item: AgentSourcePackageItem,
+    explicit: AgentSourceFileDateMetadata | None,
+) -> None:
+    exif_at = package_item.captured_at
+    exif_evidence = package_item.metadata_payload.get("date_evidence")
+    filename_dates: list[date] = []
+    for raw_date in _ISO_DATE_IN_FILENAME.findall(package_item.original_filename):
+        try:
+            filename_dates.append(date.fromisoformat(raw_date))
+        except ValueError:
+            continue
+    filename_dates = sorted(set(filename_dates))
+    evidence_dates: dict[str, date] = {}
+    explicit_at = as_utc(explicit.effective_at) if explicit is not None else None
+    explicit_evidence = (
+        _EXPLICIT_DATE_EVIDENCE[explicit.basis] if explicit is not None else None
+    )
+    if explicit_at is not None and explicit_evidence is not None:
+        evidence_dates[explicit_evidence] = explicit_at.astimezone(_TIMEZONE).date()
+    if exif_at is not None and isinstance(exif_evidence, str):
+        evidence_dates[exif_evidence] = as_utc(exif_at).astimezone(_TIMEZONE).date()
+    if len(filename_dates) == 1:
+        evidence_dates["FILENAME_ISO_DATE"] = filename_dates[0]
+    elif len(filename_dates) > 1:
+        evidence_dates["FILENAME_ISO_DATE"] = filename_dates[0]
+        package_item.metadata_payload["ambiguous_filename_dates"] = [
+            value.isoformat() for value in filename_dates
+        ]
+    if (
+        not evidence_dates
+        and package.known_start_date is not None
+        and package.known_start_date == package.known_end_date
+    ):
+        evidence_dates["PACKAGE_SINGLE_DATE"] = package.known_start_date
+
+    distinct_dates = set(evidence_dates.values())
+    if len(distinct_dates) != 1 or len(filename_dates) > 1:
+        package_item.captured_at = None
+        package_item.date_evidence = (
+            "CONFLICTING_METADATA" if evidence_dates else None
+        )
+        package_item.metadata_payload["date_evidence"] = package_item.date_evidence
+        if evidence_dates:
+            package_item.metadata_payload["date_conflict"] = {
+                key: value.isoformat() for key, value in evidence_dates.items()
+            }
+        package_item.metadata_payload["date_classification"] = "TO_CLASSIFY"
+        return
+
+    classified_date = next(iter(distinct_dates))
+    if explicit_at is not None and explicit_evidence is not None:
+        package_item.captured_at = (
+            explicit_at if explicit is not None and explicit.basis == "captured_at" else None
+        )
+        package_item.date_evidence = explicit_evidence
+        package_item.metadata_payload["explicit_effective_at"] = explicit_at.isoformat()
+    elif exif_at is not None and isinstance(exif_evidence, str):
+        package_item.date_evidence = exif_evidence
+    else:
+        package_item.captured_at = None
+        package_item.date_evidence = next(iter(evidence_dates))
+    package_item.metadata_payload["date_evidence"] = package_item.date_evidence
+    package_item.metadata_payload["classified_local_date_candidate"] = (
+        classified_date.isoformat()
+    )
 
 
 def create_private_media_url(
@@ -698,43 +942,121 @@ def _create_media_batches(
             "media_captured_at": media.get("captured_at"),
             "media_direction": media.get("direction"),
         }
-    by_date: dict[date, list[tuple[AgentSourcePackageItem, bytes]]] = {}
+    by_date_and_type: dict[
+        tuple[date, AgentBatchType],
+        list[tuple[AgentSourcePackageItem, bytes]],
+    ] = {}
+    classified_dates: set[date] = set()
     for item, content in unique_items:
-        item_date = (
-            as_utc(item.captured_at).astimezone(_TIMEZONE).date()
-            if item.captured_at is not None
-            else package.known_end_date
+        if item.date_evidence == "CONFLICTING_METADATA":
+            continue
+        captured_at = item.captured_at
+        candidate_local_date = item.metadata_payload.get(
+            "classified_local_date_candidate"
         )
-        if not package.known_start_date <= item_date <= package.known_end_date:
+        if declared_observation is not None:
+            declared_capture = declared_observation.get("media_captured_at")
+            public_at = datetime.fromisoformat(
+                str(declared_capture or declared_observation["observed_at"]).replace(
+                    "Z", "+00:00"
+                )
+            )
+            if captured_at is not None and (
+                as_utc(captured_at).astimezone(_TIMEZONE).date()
+                != as_utc(public_at).astimezone(_TIMEZONE).date()
+            ):
+                item.metadata_payload["exif_date_conflicts_with_public_submission"] = True
+            captured_at = public_at
+            item.captured_at = public_at
+            item.date_evidence = "PUBLIC_OBSERVED_AT"
+            item.metadata_payload["date_evidence"] = item.date_evidence
+        if captured_at is not None:
+            item_date = as_utc(captured_at).astimezone(_TIMEZONE).date()
+        elif isinstance(candidate_local_date, str):
+            item_date = date.fromisoformat(candidate_local_date)
+        else:
+            item.metadata_payload["date_classification"] = "TO_CLASSIFY"
+            continue
+        if (
+            package.known_start_date is not None
+            and package.known_end_date is not None
+            and not package.known_start_date <= item_date <= package.known_end_date
+        ):
             item.metadata_payload["capture_date_outside_declared_period"] = True
-            item_date = package.known_end_date
-        by_date.setdefault(item_date, []).append((item, content))
+        if item.metadata_payload.get("admin_satellite_six_band") is True:
+            item.metadata_payload["satellite_manifest_required"] = True
+            item.metadata_payload["date_classification"] = "TO_CLASSIFY"
+            item.date_classification = "TO_CLASSIFY"
+            item.date_evidence = None
+            item.classified_local_date = None
+            continue
+        batch_type = AgentBatchType.USER_MEDIA
+        by_date_and_type.setdefault((item_date, batch_type), []).append((item, content))
+        classified_dates.add(item_date)
 
-    for local_date, dated_items in sorted(by_date.items()):
+    windows_by_date: dict[date, AgentAnalysisWindow | None] = {}
+    for local_date in sorted(classified_dates):
         window = None
         if package.incident is not None and package.episode is not None:
-            window = ensure_daily_analysis_window(
+            existing = _daily_analysis_window(
                 session,
                 incident=package.incident,
                 episode=package.episode,
                 local_date=local_date,
             )
-            if package.analysis_window_id is None and len(by_date) == 1:
-                package.analysis_window_id = window.id
+            if (
+                package.public_contribution is not None
+                and existing is not None
+                and existing.state
+                in {
+                    AgentAnalysisState.COMPLETED,
+                    AgentAnalysisState.CANCELLED,
+                }
+            ):
+                # Public evidence follows its own moderation contract. Receiving a
+                # historical contribution must not reopen or mutate a terminal
+                # agentic analysis window, so keep this batch unlinked (schema 1.0)
+                # while preserving the classified observation date for review.
+                window = None
+            else:
+                window = ensure_daily_analysis_window(
+                    session,
+                    incident=package.incident,
+                    episode=package.episode,
+                    local_date=local_date,
+                )
+        windows_by_date[local_date] = window
+
+    for (local_date, batch_type), dated_items in sorted(
+        by_date_and_type.items(),
+        key=lambda entry: (entry[0][0], entry[0][1].value),
+    ):
+        window = windows_by_date[local_date]
+        for package_item, _content in dated_items:
+            package_item.date_classification = "CLASSIFIED"
+            package_item.classified_local_date = local_date
+            package_item.analysis_window_id = window.id if window is not None else None
+            package_item.metadata_payload["date_classification"] = "CLASSIFIED"
+            package_item.metadata_payload["classified_local_date"] = local_date.isoformat()
+            if package.public_contribution is not None and window is None:
+                package_item.metadata_payload["terminal_analysis_window_unlinked"] = True
         for offset in range(0, len(dated_items), 32):
             chunk = dated_items[offset : offset + 32]
             batch_id = new_prefixed_id("AB")
             batch = AgentMediaBatch(
                 batch_id=batch_id,
                 schema_version="2.0" if window is not None else "1.0",
-                batch_type=AgentBatchType.USER_MEDIA,
+                batch_type=batch_type,
                 priority=AgentBatchPriority.SCHEDULED_COMBINED,
                 state=AgentBatchState.DRAFT,
                 incident_id=package.incident_id,
                 episode_id=package.episode_id,
                 analysis_window_id=window.id if window is not None else None,
                 reference_bundle_payload=None,
-                idempotency_key=f"source-package:{package.package_id}:{local_date}:{offset // 32}",
+                idempotency_key=(
+                    f"source-package:{package.package_id}:{local_date}:"
+                    f"{batch_type.value}:{offset // 32}"
+                ),
                 request_hash=hashlib.sha256(
                     "\n".join(item.sha256 for item, _content in chunk).encode()
                 ).hexdigest(),
@@ -744,15 +1066,17 @@ def _create_media_batches(
             )
             session.add(batch)
             for package_item, content in chunk:
-                captured_at = (
-                    declared_observation.get("media_captured_at")
-                    if declared_observation is not None
-                    else None
-                )
-                if captured_at is None and package_item.captured_at is not None:
-                    captured_at = as_utc(package_item.captured_at).isoformat()
-                if captured_at is None and declared_observation is not None:
-                    captured_at = declared_observation["observed_at"]
+                captured_at_value: str | None = None
+                if declared_observation is not None:
+                    declared_capture = declared_observation.get("media_captured_at")
+                    if isinstance(declared_capture, str):
+                        captured_at_value = declared_capture
+                if captured_at_value is None and package_item.captured_at is not None:
+                    captured_at_value = as_utc(package_item.captured_at).isoformat()
+                if captured_at_value is None and declared_observation is not None:
+                    observed_at = declared_observation.get("observed_at")
+                    if isinstance(observed_at, str):
+                        captured_at_value = observed_at
                 proxy_url = create_private_media_url(
                     source_kind="source_package",
                     source_id=package.package_id,
@@ -772,7 +1096,9 @@ def _create_media_batches(
                 processable: dict[str, object] = {
                     "frames": [],
                     "audio_url": (
-                        proxy_url if package_item.media_type == AgentMediaType.AUDIO else None
+                        proxy_url
+                        if package_item.media_type == AgentMediaType.AUDIO
+                        else None
                     ),
                     "article_text": (
                         _article_text(content, package_item.content_type)
@@ -795,7 +1121,7 @@ def _create_media_batches(
                             "trust": "unverified",
                             "declared_observation": declared_observation,
                         },
-                        "captured_at": captured_at,
+                        "captured_at": captured_at_value,
                         "camera": None,
                         "satellite": None,
                         "private_source_package": {
@@ -824,6 +1150,19 @@ def _create_media_batches(
                 batch.items.append(media_item)
                 session.flush()
                 package_item.agent_media_item_id = media_item.id
+
+    if len(classified_dates) == 1 and package.incident is not None:
+        only_date = next(iter(classified_dates))
+        window = windows_by_date.get(only_date)
+        if window is not None:
+            package.analysis_window_id = window.id
+    elif len(classified_dates) > 1:
+        package.analysis_window_id = None
+
+    ordered_dates = sorted(classified_dates)
+    if ordered_dates and package.known_start_date is None:
+        package.known_start_date = ordered_dates[0]
+        package.known_end_date = ordered_dates[-1]
 
 
 def _daily_satellite_inventory(
@@ -1298,6 +1637,21 @@ def finalize_source_package(
         )
 
     package.state = AgentSourcePackageState.FINALIZING
+    explicit_dates = _file_date_metadata(package)
+    uploaded_filenames = [
+        PurePosixPath(stored.pathname).name.casefold() for stored in inventory
+    ]
+    if explicit_dates and len(uploaded_filenames) != len(set(uploaded_filenames)):
+        raise BadRequestError(
+            "source_filename_ambiguous",
+            "Explicit date metadata requires unique uploaded filenames.",
+        )
+    unknown_date_files = set(explicit_dates).difference(uploaded_filenames)
+    if unknown_date_files:
+        raise BadRequestError(
+            "source_file_date_metadata_mismatch",
+            "Explicit date metadata references a file that was not uploaded.",
+        )
     unique_hashes: set[str] = set()
     unique_items: list[tuple[AgentSourcePackageItem, bytes]] = []
     for stored in inventory:
@@ -1321,7 +1675,19 @@ def finalize_source_package(
             "detected_content_type": content_type,
         }
         if media_type == AgentMediaType.IMAGE:
-            captured_at, image_metadata = _image_metadata(content)
+            if suffix in {".tif", ".tiff"} and _tiff_samples_per_pixel(content) == len(
+                _CANONICAL_BURNED_AREA_BANDS
+            ):
+                image_metadata = _geotiff_metadata(
+                    content,
+                    declared_bands=list(_CANONICAL_BURNED_AREA_BANDS),
+                    declared_bbox_wgs84=None,
+                )
+                media_type = AgentMediaType.SATELLITE_IMAGE
+                captured_at = None
+                image_metadata["admin_satellite_six_band"] = True
+            else:
+                captured_at, image_metadata = _image_metadata(content)
             metadata.update(image_metadata)
         digest = hashlib.sha256(content).hexdigest()
         package_item = AgentSourcePackageItem(
@@ -1336,13 +1702,20 @@ def finalize_source_package(
             captured_at=captured_at,
             metadata_payload=metadata,
         )
+        if package.public_contribution is None:
+            _resolve_admin_item_date(
+                package=package,
+                package_item=package_item,
+                explicit=explicit_dates.get(package_item.original_filename.casefold()),
+            )
+        elif captured_at is not None:
+            package_item.date_evidence = cast(str, metadata.get("date_evidence"))
         package.items.append(package_item)
         if digest in unique_hashes:
             package_item.metadata_payload["duplicate_within_package"] = True
         else:
             unique_hashes.add(digest)
             unique_items.append((package_item, content))
-    session.flush()
 
     _create_media_batches(
         session,
@@ -1350,6 +1723,52 @@ def finalize_source_package(
         unique_items=unique_items,
         settings=settings,
     )
+    unique_by_hash = {item.sha256: item for item, _content in unique_items}
+    for package_item in package.items:
+        if not package_item.metadata_payload.get("duplicate_within_package"):
+            continue
+        source_item = unique_by_hash[package_item.sha256]
+        if package.package_kind == AgentSourcePackageKind.ADMIN_SOURCES:
+            candidate_date = package_item.metadata_payload.get(
+                "classified_local_date_candidate"
+            )
+            source_date = source_item.classified_local_date
+            if (
+                package_item.date_evidence == "CONFLICTING_METADATA"
+                or source_item.date_classification != "CLASSIFIED"
+                or source_date is None
+                or candidate_date != source_date.isoformat()
+            ):
+                package_item.date_classification = "TO_CLASSIFY"
+                package_item.classified_local_date = None
+                package_item.analysis_window_id = None
+                package_item.metadata_payload["date_classification"] = "TO_CLASSIFY"
+                package_item.metadata_payload["duplicate_date_requires_review"] = True
+                continue
+            package_item.date_classification = "CLASSIFIED"
+            package_item.classified_local_date = source_date
+            package_item.analysis_window_id = source_item.analysis_window_id
+            package_item.metadata_payload["date_classification"] = "CLASSIFIED"
+            package_item.metadata_payload["classified_local_date"] = source_date.isoformat()
+            # Keep the duplicate file's own timestamp and evidence. Deduplication
+            # reuses the routed media item, not the provenance of every upload.
+            continue
+        package_item.captured_at = source_item.captured_at
+        package_item.date_classification = source_item.date_classification
+        package_item.date_evidence = source_item.date_evidence
+        package_item.classified_local_date = source_item.classified_local_date
+        package_item.analysis_window_id = source_item.analysis_window_id
+        package_item.metadata_payload.update(
+            {
+                "date_classification": source_item.date_classification,
+                "date_evidence": source_item.date_evidence,
+                "classified_local_date": (
+                    source_item.classified_local_date.isoformat()
+                    if source_item.classified_local_date is not None
+                    else None
+                ),
+            }
+        )
     package.state = AgentSourcePackageState.CONVERTED
     package.finalized_at = utcnow()
     record_operator_audit(
@@ -1363,6 +1782,12 @@ def finalize_source_package(
         after={
             "files": len(package.items),
             "unique_media": len(unique_items),
+            "classified_files": sum(
+                item.date_classification == "CLASSIFIED" for item in package.items
+            ),
+            "files_to_classify": sum(
+                item.date_classification == "TO_CLASSIFY" for item in package.items
+            ),
             "publication_authorized": False,
         },
     )

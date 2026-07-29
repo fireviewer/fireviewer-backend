@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from tifffile import imwrite
 
 from fire_viewer.db.models import (
+    AgentDispatch,
     AgentMediaBatch,
     AgentMediaConsent,
     AgentMediaItem,
@@ -60,6 +61,15 @@ class _FakeSourceStore:
 def _png(index: int) -> bytes:
     output = BytesIO()
     Image.new("RGB", (4, 4), color=(index % 255, (index * 3) % 255, 17)).save(output, format="PNG")
+    return output.getvalue()
+
+
+def _jpeg(index: int) -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (8, 8), color=(index % 255, (index * 5) % 255, 29)).save(
+        output,
+        format="JPEG",
+    )
     return output.getvalue()
 
 
@@ -194,20 +204,31 @@ def test_normal_source_package_endpoint_splits_to_user_media_without_job(
 ) -> None:
     seed_incident(fire_id="FR-26-00001", sequence=1, lon=5.37, lat=44.75)
     _store, total_size = _prepare_upload(monkeypatch, settings, count=33)
+    open_payload = {
+        "file_count": 33,
+        "total_size_bytes": total_size,
+        "known_start_date": "2026-07-09",
+        "known_end_date": "2026-07-09",
+        "location_hint": "Die, massif de Justin",
+        "authorize_private_analysis": True,
+    }
     opened = client.post(
         "/api/v2/admin/agent-batches/incidents/FR-26-00001/source-packages/open",
         headers={"Idempotency-Key": "die-user-package-day-0001"},
-        json={
-            "file_count": 33,
-            "total_size_bytes": total_size,
-            "known_start_date": "2026-07-09",
-            "known_end_date": "2026-07-09",
-            "location_hint": "Die, massif de Justin",
-            "authorize_private_analysis": True,
-        },
+        json=open_payload,
     )
     assert opened.status_code == 201, opened.text
     package_id = opened.json()["package_id"]
+    resumed = client.post(
+        "/api/v2/admin/agent-batches/incidents/FR-26-00001/source-packages/open",
+        headers={"Idempotency-Key": "die-user-package-day-0001"},
+        json=open_payload,
+    )
+    assert resumed.status_code == 201, resumed.text
+    assert resumed.json()["package_id"] == package_id
+    assert resumed.json()["already_uploaded_filenames"] == [
+        f"photo-{index:02d}.png" for index in range(33)
+    ]
 
     finalized = client.post(f"/api/v2/admin/agent-batches/source-packages/{package_id}/finalize")
     assert finalized.status_code == 200, finalized.text
@@ -226,6 +247,241 @@ def test_normal_source_package_endpoint_splits_to_user_media_without_job(
     assert {batch.batch_type for batch in session.scalars(select(AgentMediaBatch)).all()} == {
         AgentBatchType.USER_MEDIA
     }
+    reopened = client.post(
+        "/api/v2/admin/agent-batches/incidents/FR-26-00001/source-packages/open",
+        headers={"Idempotency-Key": "die-user-package-day-0001"},
+        json=open_payload,
+    )
+    assert reopened.status_code == 409, reopened.text
+    assert reopened.json()["type"].endswith("source_package_already_finalized")
+
+
+def test_source_package_rejects_a_period_longer_than_32_days(client) -> None:
+    response = client.post(
+        "/api/v2/admin/agent-batches/incidents/FR-77-00001/source-packages/open",
+        headers={"Idempotency-Key": "source-period-too-long-0001"},
+        json={
+            "file_count": 1,
+            "total_size_bytes": 1,
+            "known_start_date": "2026-07-01",
+            "known_end_date": "2026-08-02",
+            "authorize_private_analysis": True,
+        },
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_admin_source_package_classifies_multiple_days_and_quarantines_satellite(
+    client, session, settings, seed_incident, monkeypatch
+) -> None:
+    seed_incident(fire_id="FR-77-00001", sequence=1, lon=2.61, lat=48.39)
+    files = {
+        "firewarning/source-packages/upload-fixed/ground-2026-07-12.jpg": _jpeg(12),
+        "firewarning/source-packages/upload-fixed/sentinel-2026-07-13.tif": (
+            _six_band_geotiff(origin_x=2.5, origin_y=48.49)
+        ),
+        "firewarning/source-packages/upload-fixed/official-note.txt": (
+            b"Point de situation officiel."
+        ),
+        "firewarning/source-packages/upload-fixed/ground-explicit.jpg": _jpeg(14),
+        "firewarning/source-packages/upload-fixed/undated.jpg": _jpeg(15),
+    }
+    store = _FakeSourceStore(files)
+    total_size = sum(len(content) for content in files.values())
+    settings.object_storage_backend = "vercel_blob"
+    settings.blob_read_write_token = SecretStr("vercel_blob_rw_teststore_test-secret")
+    settings.agent_media_proxy_base_url = "https://testserver"
+    settings.agent_media_allowed_hosts = ["testserver"]
+
+    def fake_grant(**kwargs):
+        del kwargs
+        return BlobUploadGrant(
+            upload_id="upload-fixed",
+            pathname_prefix="firewarning/source-packages/upload-fixed",
+            token="g" * 128,
+            expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        )
+
+    monkeypatch.setattr(
+        "fire_viewer.services.agent_source_packages.create_source_blob_upload_grant",
+        fake_grant,
+    )
+    monkeypatch.setattr(
+        "fire_viewer.services.agent_source_packages.build_object_store",
+        lambda _settings: store,
+    )
+
+    opened = client.post(
+        "/api/v2/admin/agent-batches/incidents/FR-77-00001/source-packages/open",
+        headers={"Idempotency-Key": "fontainebleau-admin-multiday-0001"},
+        json={
+            "file_count": len(files),
+            "total_size_bytes": total_size,
+            "location_hint": "Fontainebleau",
+            "authorize_private_analysis": True,
+            "file_date_metadata": [
+                {
+                    "filename": "sentinel-2026-07-13.tif",
+                    "effective_at": "2026-07-13T10:30:00Z",
+                    "basis": "acquired_at",
+                },
+                {
+                    "filename": "ground-explicit.jpg",
+                    "effective_at": "2026-07-14T15:00:00+02:00",
+                    "basis": "captured_at",
+                },
+                {
+                    "filename": "official-note.txt",
+                    "effective_at": "2026-07-13T18:00:00+02:00",
+                    "basis": "published_at",
+                },
+            ],
+        },
+    )
+    assert opened.status_code == 201, opened.text
+    finalized = client.post(
+        f"/api/v2/admin/agent-batches/source-packages/"
+        f"{opened.json()['package_id']}/finalize"
+    )
+    assert finalized.status_code == 200, finalized.text
+    result = finalized.json()
+    assert result["package_kind"] == "ADMIN_SOURCES"
+    assert result["known_start_date"] == "2026-07-12"
+    assert result["known_end_date"] == "2026-07-14"
+    assert result["classified_item_count"] == 3
+    assert result["to_classify_item_count"] == 2
+    assert result["analysis_window_count"] == 3
+    assert [group["local_date"] for group in result["date_groups"]] == [
+        "2026-07-12",
+        "2026-07-13",
+        "2026-07-14",
+    ]
+
+    items = {item["original_filename"]: item for item in result["items"]}
+    assert items["ground-2026-07-12.jpg"]["date_evidence"] == "FILENAME_ISO_DATE"
+    assert items["sentinel-2026-07-13.tif"]["media_type"] == "satellite_image"
+    assert items["sentinel-2026-07-13.tif"]["date_classification"] == "TO_CLASSIFY"
+    assert items["sentinel-2026-07-13.tif"]["analysis_window_id"] is None
+    assert items["sentinel-2026-07-13.tif"]["batch_id"] is None
+    assert items["official-note.txt"]["date_evidence"] == "EXPLICIT_PUBLISHED_AT"
+    assert items["official-note.txt"]["captured_at"] is None
+    assert items["ground-explicit.jpg"]["date_evidence"] == "EXPLICIT_CAPTURED_AT"
+    assert items["undated.jpg"]["date_classification"] == "TO_CLASSIFY"
+    assert items["undated.jpg"]["analysis_window_id"] is None
+    assert items["undated.jpg"]["batch_id"] is None
+
+    batches = list(
+        session.scalars(
+            select(AgentMediaBatch).order_by(
+                AgentMediaBatch.analysis_window_id,
+                AgentMediaBatch.batch_type,
+            )
+        )
+    )
+    assert len(batches) == 3
+    assert {batch.batch_type for batch in batches} == {AgentBatchType.USER_MEDIA}
+    assert session.scalar(select(func.count()).select_from(Job)) == 0
+
+    settings.agent_dispatch_enabled = True
+    overview = client.get(
+        "/api/v2/admin/agent-batches/incidents/FR-77-00001/operations"
+    )
+    assert overview.status_code == 200, overview.text
+    available_ids = {
+        item["analysis_window_id"] for item in overview.json()["available_windows"]
+    }
+    expected_windows = {
+        group["analysis_window_id"]: group["local_date"]
+        for group in result["date_groups"]
+    }
+    assert set(expected_windows).issubset(available_ids)
+    for analysis_window_id in expected_windows:
+        launched = client.post(
+            "/api/v2/admin/agent-batches/incidents/FR-77-00001/operations/user_media/run",
+            json={"expected_analysis_window_id": analysis_window_id},
+        )
+        assert launched.status_code == 200, launched.text
+        assert launched.json()["analysis_window_id"] == analysis_window_id
+
+    session.expire_all()
+    dispatches = list(session.scalars(select(AgentDispatch).order_by(AgentDispatch.id)))
+    assert len(dispatches) == 3
+    assert {
+        (
+            dispatch.payload["analysis_window"]["analysis_id"],
+            dispatch.payload["analysis_window"]["local_date"],
+        )
+        for dispatch in dispatches
+    } == set(expected_windows.items())
+
+
+def test_multiday_declared_range_never_forces_ambiguous_or_undated_files(
+    client, session, settings, seed_incident, monkeypatch
+) -> None:
+    seed_incident(fire_id="FR-77-00001", sequence=1, lon=2.61, lat=48.39)
+    files = {
+        "firewarning/source-packages/upload-fixed/ground-2026-07-12.jpg": _jpeg(12),
+        "firewarning/source-packages/upload-fixed/undated.jpg": _jpeg(13),
+    }
+    store = _FakeSourceStore(files)
+    total_size = sum(len(content) for content in files.values())
+    settings.object_storage_backend = "vercel_blob"
+    settings.blob_read_write_token = SecretStr("vercel_blob_rw_teststore_test-secret")
+
+    def fake_grant(**kwargs):
+        del kwargs
+        return BlobUploadGrant(
+            upload_id="upload-fixed",
+            pathname_prefix="firewarning/source-packages/upload-fixed",
+            token="g" * 128,
+            expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        )
+
+    monkeypatch.setattr(
+        "fire_viewer.services.agent_source_packages.create_source_blob_upload_grant",
+        fake_grant,
+    )
+    monkeypatch.setattr(
+        "fire_viewer.services.agent_source_packages.build_object_store",
+        lambda _settings: store,
+    )
+
+    opened = client.post(
+        "/api/v2/admin/agent-batches/incidents/FR-77-00001/source-packages/open",
+        headers={"Idempotency-Key": "fontainebleau-range-does-not-classify-0001"},
+        json={
+            "file_count": len(files),
+            "total_size_bytes": total_size,
+            "known_start_date": "2026-07-12",
+            "known_end_date": "2026-07-14",
+            "authorize_private_analysis": True,
+            "file_date_metadata": [
+                {
+                    "filename": "ground-2026-07-12.jpg",
+                    "effective_at": "2026-07-13T10:00:00Z",
+                    "basis": "captured_at",
+                }
+            ],
+        },
+    )
+    assert opened.status_code == 201, opened.text
+    finalized = client.post(
+        f"/api/v2/admin/agent-batches/source-packages/"
+        f"{opened.json()['package_id']}/finalize"
+    )
+    assert finalized.status_code == 200, finalized.text
+    result = finalized.json()
+    assert result["classified_item_count"] == 0
+    assert result["to_classify_item_count"] == 2
+    assert result["analysis_window_count"] == 0
+    assert result["batch_ids"] == []
+    items = {item["original_filename"]: item for item in result["items"]}
+    assert (
+        items["ground-2026-07-12.jpg"]["date_evidence"]
+        == "CONFLICTING_METADATA"
+    )
+    assert items["undated.jpg"]["date_evidence"] is None
+    assert all(item["analysis_window_id"] is None for item in result["items"])
 
 
 def test_daily_satellite_package_uses_active_window_and_builds_sensor_inputs(

@@ -203,17 +203,33 @@ def resolve_requested_analysis_window(
     Campaign windows are independent operational records.  Historic processing
     may therefore queue several already-manifested days for the same incident;
     only the stable analysis identifier accepted by the manifest can select one.
-    Outside a campaign, retain the normal current-window behaviour.
+    Outside a campaign, the same immutable identifier may select any
+    non-terminal window already created for the incident episode.
     """
 
     campaign = active_campaign(session)
     if campaign is None:
-        active = resolve_active_analysis_window(session, incident=incident, episode=episode)
-        require_expected_window(
-            active,
-            expected_analysis_window_id=expected_analysis_window_id,
+        window = session.scalar(
+            select(AgentAnalysisWindow).where(
+                AgentAnalysisWindow.incident_id == incident.id,
+                AgentAnalysisWindow.episode_id == episode.id,
+                AgentAnalysisWindow.analysis_id == expected_analysis_window_id,
+            )
         )
-        return active
+        if window is None:
+            raise ConflictError(
+                "agent_analysis_window_stale",
+                "The selected analysis window does not belong to this incident episode.",
+            )
+        if window.state in {
+            AgentAnalysisState.COMPLETED,
+            AgentAnalysisState.CANCELLED,
+        }:
+            raise ConflictError(
+                "agent_analysis_window_terminal",
+                "A completed or cancelled analysis window cannot be executed again.",
+            )
+        return ActiveAnalysisWindow(window=window, campaign_day=None)
 
     matching_day = next(
         (
