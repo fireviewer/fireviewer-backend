@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -7,9 +8,12 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
 from fire_viewer.db.engine import normalize_database_url
+from fire_viewer.scripts.restore_die_retrospective import _load_payload, restore
 
 _PRODUCTION = "production"
 _LOCK_KEY = 2_026_072_800_001
@@ -28,7 +32,32 @@ def _alembic_config(project_root: Path) -> Config:
     return config
 
 
-def _upgrade_postgresql(database_url: str, config: Config, expected_revision: str) -> None:
+def _restore_die_retrospective_if_requested(engine: Engine, project_root: Path) -> None:
+    if os.environ.get("FV_RESTORE_DIE_RETROSPECTIVE") != "1":
+        return
+
+    dataset = project_root / "src" / "fire_viewer" / "retrospectives" / "die-2026-v1.json"
+    payload = _load_payload(dataset)
+    with Session(bind=engine) as session:
+        result = restore(
+            session,
+            payload,
+            actor="fireviewer-retrospective-recovery",
+            apply=True,
+        )
+    print(
+        "FireViewer retrospective restoration: "
+        + json.dumps(result, ensure_ascii=False, sort_keys=True)
+    )
+
+
+def _upgrade_postgresql(
+    database_url: str,
+    config: Config,
+    expected_revision: str,
+    *,
+    project_root: Path,
+) -> None:
     engine = create_engine(normalize_database_url(database_url), poolclass=NullPool)
     try:
         with engine.begin() as connection:
@@ -45,6 +74,7 @@ def _upgrade_postgresql(database_url: str, config: Config, expected_revision: st
                 raise RuntimeError(
                     "Production migration finished on an unexpected schema revision"
                 )
+        _restore_die_retrospective_if_requested(engine, project_root)
     finally:
         engine.dispose()
 
@@ -71,7 +101,12 @@ def main() -> None:
             "FV_DATABASE_SCHEMA_REVISION does not match the packaged Alembic head"
         )
 
-    _upgrade_postgresql(database_url, config, expected_revision)
+    _upgrade_postgresql(
+        database_url,
+        config,
+        expected_revision,
+        project_root=project_root,
+    )
     print(f"FireViewer migration gate: production schema ready at {expected_revision}")
 
 
