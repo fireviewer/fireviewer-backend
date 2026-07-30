@@ -212,6 +212,17 @@ def _has_ready_zone(session: Session, *, window_id: int, zone_kind: str) -> bool
     ) is not None
 
 
+def _active_reason(activity: dict[str, Any]) -> str:
+    reason = "Zone active datée reconstituée depuis les références de la journée."
+    basis = activity.get("basis")
+    if isinstance(basis, str) and basis.strip():
+        reason += f" Méthode : {basis.strip()}."
+    confidence = activity.get("confidence")
+    if isinstance(confidence, str) and confidence.strip():
+        reason += f" Confiance : {confidence.strip()}."
+    return reason
+
+
 def _ensure_zones(
     session: Session,
     incident: IncidentSeries,
@@ -246,7 +257,7 @@ def _ensure_zones(
                 "active",
                 daily_geometry,
                 activity["geometry_origin"],
-                f"Zone active datée : {activity['basis']} Confiance : {activity['confidence']}.",
+                _active_reason(activity),
             ),
             (
                 "burned",
