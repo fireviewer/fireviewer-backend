@@ -2624,7 +2624,7 @@ class IncidentSpatialMarker(Base, TimestampMixin):
 
 
 class ActiveFireZoneRevision(Base, TimestampMixin):
-    """Immutable geographic revision of the observed active-fire zone."""
+    """Immutable geographic revision of an active or cumulative fire zone."""
 
     __tablename__ = "active_fire_zone_revision"
 
@@ -2641,6 +2641,7 @@ class ActiveFireZoneRevision(Base, TimestampMixin):
     analysis_window_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_analysis_window.id", ondelete="RESTRICT"), index=True
     )
+    zone_kind: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
     valid_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     geometry_geojson: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
@@ -2665,8 +2666,15 @@ class ActiveFireZoneRevision(Base, TimestampMixin):
     analysis_window: Mapped[AgentAnalysisWindow | None] = relationship()
 
     __table_args__ = (
-        UniqueConstraint("incident_id", "episode_id", "revision", name="uq_active_zone_revision"),
+        UniqueConstraint(
+            "incident_id",
+            "episode_id",
+            "zone_kind",
+            "revision",
+            name="uq_zone_revision_by_kind",
+        ),
         CheckConstraint("revision >= 1", name="ck_active_zone_revision_positive"),
+        CheckConstraint("zone_kind IN ('active', 'burned')", name="ck_active_zone_kind"),
         CheckConstraint(
             "geometry_origin IN ('HUMAN_AUTHORED', 'DETERMINISTIC_UNION', "
             "'SATELLITE_PRODUCT', 'AGENT_DERIVED')",

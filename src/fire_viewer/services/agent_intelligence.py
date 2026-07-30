@@ -100,6 +100,7 @@ def _refresh_daily_activity_zone(
         .where(
             ActiveFireZoneRevision.incident_id == batch.incident_id,
             ActiveFireZoneRevision.episode_id == batch.episode_id,
+            ActiveFireZoneRevision.zone_kind == "active",
         )
         .order_by(ActiveFireZoneRevision.revision.desc())
         .limit(1)
@@ -122,6 +123,7 @@ def _refresh_daily_activity_zone(
         incident_id=batch.incident_id,
         episode_id=batch.episode_id,
         analysis_window_id=analysis_window.id,
+        zone_kind="active",
         revision=(latest.revision if latest is not None else 0) + 1,
         valid_at=analysis_window.window_end_at,
         geometry_geojson=geometry,

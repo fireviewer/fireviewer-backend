@@ -411,6 +411,7 @@ def get_public_incident_view(
             evidence_projections=[],
             active_fire_zone=None,
             active_fire_zones=[],
+            burned_area_zones=[],
             daily_intelligence=[],
             map_gallery=[],
             gallery=[],
@@ -654,17 +655,20 @@ def get_public_incident_view(
     published_window_ids = select(AgentValidationCampaignDay.analysis_window_id).where(
         AgentValidationCampaignDay.state == AgentValidationCampaignDayState.PUBLISHED
     )
-    active_zones = list(
+    publicly_visible_zone = or_(
+        ActiveFireZoneRevision.analysis_window_id.is_(None),
+        ActiveFireZoneRevision.geometry_origin.in_(("HUMAN_AUTHORED", "SATELLITE_PRODUCT")),
+        ActiveFireZoneRevision.analysis_window_id.in_(published_window_ids),
+    )
+    approved_zones = list(
         session.scalars(
             select(ActiveFireZoneRevision)
             .where(
                 ActiveFireZoneRevision.incident_id == incident.id,
                 ActiveFireZoneRevision.episode_id == current.id,
-                ActiveFireZoneRevision.review_state == ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
-                or_(
-                    ActiveFireZoneRevision.analysis_window_id.is_(None),
-                    ActiveFireZoneRevision.analysis_window_id.in_(published_window_ids),
-                ),
+                ActiveFireZoneRevision.review_state
+                == ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
+                publicly_visible_zone,
             )
             .order_by(
                 ActiveFireZoneRevision.valid_at.asc(),
@@ -673,6 +677,8 @@ def get_public_incident_view(
             .limit(500)
         )
     )
+    active_zones = [zone for zone in approved_zones if zone.zone_kind == "active"]
+    burned_zones = [zone for zone in approved_zones if zone.zone_kind == "burned"]
     active_zone = active_zones[-1] if active_zones else None
     map_captures = list(
         session.scalars(
@@ -686,10 +692,7 @@ def get_public_incident_view(
                 IncidentMapCapture.episode_id == current.id,
                 ActiveFireZoneRevision.review_state
                 == ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
-                or_(
-                    ActiveFireZoneRevision.analysis_window_id.is_(None),
-                    ActiveFireZoneRevision.analysis_window_id.in_(published_window_ids),
-                ),
+                publicly_visible_zone,
             )
             .options(selectinload(IncidentMapCapture.active_zone_revision))
             .order_by(
@@ -749,6 +752,7 @@ def get_public_incident_view(
         active_fire_zone=(
             PublicActiveFireZone(
                 zone_revision_id=active_zone.zone_revision_id,
+                zone_kind=active_zone.zone_kind,
                 revision=active_zone.revision,
                 valid_at=as_utc(active_zone.valid_at),
                 analysis_id=(
@@ -764,6 +768,7 @@ def get_public_incident_view(
         active_fire_zones=[
             PublicActiveFireZone(
                 zone_revision_id=zone.zone_revision_id,
+                zone_kind=zone.zone_kind,
                 revision=zone.revision,
                 valid_at=as_utc(zone.valid_at),
                 analysis_id=(
@@ -774,6 +779,21 @@ def get_public_incident_view(
                 geometry_geojson=zone.geometry_geojson,
             )
             for zone in active_zones
+        ],
+        burned_area_zones=[
+            PublicActiveFireZone(
+                zone_revision_id=zone.zone_revision_id,
+                zone_kind=zone.zone_kind,
+                revision=zone.revision,
+                valid_at=as_utc(zone.valid_at),
+                analysis_id=(
+                    zone.analysis_window.analysis_id
+                    if zone.analysis_window is not None
+                    else None
+                ),
+                geometry_geojson=zone.geometry_geojson,
+            )
+            for zone in burned_zones
         ],
         daily_intelligence=daily_intelligence,
         map_gallery=[

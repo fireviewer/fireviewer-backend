@@ -6705,6 +6705,15 @@
             "minimum": 0.0,
             "title": "Expected Latest Revision"
           },
+          "zone_kind": {
+            "type": "string",
+            "enum": [
+              "active",
+              "burned"
+            ],
+            "title": "Zone Kind",
+            "default": "active"
+          },
           "valid_at": {
             "type": "string",
             "format": "date-time",
@@ -6767,6 +6776,14 @@
           "zone_revision_id": {
             "type": "string",
             "title": "Zone Revision Id"
+          },
+          "zone_kind": {
+            "type": "string",
+            "enum": [
+              "active",
+              "burned"
+            ],
+            "title": "Zone Kind"
           },
           "revision": {
             "type": "integer",
@@ -6904,6 +6921,7 @@
         "type": "object",
         "required": [
           "zone_revision_id",
+          "zone_kind",
           "revision",
           "valid_at",
           "geometry_geojson",
@@ -18360,6 +18378,14 @@
             "minLength": 1,
             "title": "Zone Revision Id"
           },
+          "zone_kind": {
+            "type": "string",
+            "enum": [
+              "active",
+              "burned"
+            ],
+            "title": "Zone Kind"
+          },
           "revision": {
             "type": "integer",
             "minimum": 1.0,
@@ -18369,6 +18395,19 @@
             "type": "string",
             "format": "date-time",
             "title": "Valid At"
+          },
+          "analysis_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analysis Id"
           },
           "geometry_geojson": {
             "additionalProperties": true,
@@ -18380,6 +18419,7 @@
         "type": "object",
         "required": [
           "zone_revision_id",
+          "zone_kind",
           "revision",
           "valid_at",
           "geometry_geojson"
@@ -19754,6 +19794,22 @@
                 "type": "null"
               }
             ]
+          },
+          "active_fire_zones": {
+            "items": {
+              "$ref": "#/components/schemas/PublicActiveFireZone"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Active Fire Zones"
+          },
+          "burned_area_zones": {
+            "items": {
+              "$ref": "#/components/schemas/PublicActiveFireZone"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Burned Area Zones"
           },
           "daily_intelligence": {
             "items": {

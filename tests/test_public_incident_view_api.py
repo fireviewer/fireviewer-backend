@@ -6,11 +6,11 @@ from sqlalchemy import text
 
 from fire_viewer.core.security import Actor
 from fire_viewer.db.models import (
+    ActiveFireZoneRevision,
     IncidentGalleryItem,
     IncidentOperationalInformation,
     Observation,
     Source,
-    ActiveFireZoneRevision,
 )
 from fire_viewer.domain.enums import (
     ActiveFireZoneReviewState,
@@ -150,6 +150,24 @@ def test_public_view_uses_the_latest_historical_zone_by_effective_date(
                 review_reason="Calque historique contrôlé avant publication.",
                 reason="Contour du 11 juillet saisi après celui du 12 juillet.",
             ),
+            ActiveFireZoneRevision(
+                zone_revision_id="azr-history-burned-area",
+                incident_id=incident.id,
+                episode_id=episode.id,
+                zone_kind="burned",
+                revision=1,
+                valid_at=datetime(2026, 7, 12, 23, 59, tzinfo=UTC),
+                geometry_geojson=geometry,
+                geometry_origin="HUMAN_AUTHORED",
+                supporting_marker_ids=[],
+                source_revision_ids=[],
+                review_state=ActiveFireZoneReviewState.READY_FOR_PUBLICATION,
+                created_by="admin-test",
+                reviewed_by="admin-test",
+                reviewed_at=datetime(2026, 7, 13, tzinfo=UTC),
+                review_reason="Zone parcourue contrôlée avant publication.",
+                reason="Empreinte cumulée du 12 juillet distincte de la zone active.",
+            ),
         ]
     )
     session.commit()
@@ -161,6 +179,16 @@ def test_public_view_uses_the_latest_historical_zone_by_effective_date(
     assert [item["zone_revision_id"] for item in response.json()["active_fire_zones"]] == [
         "azr-history-later-revision",
         "azr-history-earlier",
+    ]
+    assert response.json()["burned_area_zones"] == [
+        {
+            "zone_revision_id": "azr-history-burned-area",
+            "zone_kind": "burned",
+            "revision": 1,
+            "valid_at": "2026-07-12T23:59:00Z",
+            "analysis_id": None,
+            "geometry_geojson": geometry,
+        }
     ]
     assert (
         client.get(f"/api/v1/incident/{incident.fire_id}/public-view/export.json").json()["fire_id"]

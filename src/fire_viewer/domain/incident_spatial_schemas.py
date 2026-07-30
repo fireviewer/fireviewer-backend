@@ -52,6 +52,7 @@ class AdminIncidentSpatialMarker(StrictSpatialReviewModel):
 
 class AdminActiveFireZoneRevision(StrictSpatialReviewModel):
     zone_revision_id: str
+    zone_kind: Literal["active", "burned"]
     revision: int = Field(ge=1)
     valid_at: datetime
     geometry_geojson: dict[str, Any]
@@ -178,6 +179,7 @@ class IncidentMarkerReviewRequest(StrictSpatialReviewModel):
 
 class ActiveFireZoneRevisionCreateRequest(StrictSpatialReviewModel):
     expected_latest_revision: int = Field(ge=0)
+    zone_kind: Literal["active", "burned"] = "active"
     valid_at: datetime
     analysis_id: str | None = Field(default=None, min_length=1, max_length=128)
     geometry_geojson: dict[str, Any]

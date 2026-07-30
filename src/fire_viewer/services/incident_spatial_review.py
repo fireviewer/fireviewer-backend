@@ -374,6 +374,7 @@ def _zone_response(
     supersedes = revisions_by_id.get(item.supersedes_revision_id or -1)
     return AdminActiveFireZoneRevision(
         zone_revision_id=item.zone_revision_id,
+        zone_kind=item.zone_kind,
         revision=item.revision,
         valid_at=as_utc(item.valid_at),
         geometry_geojson=item.geometry_geojson,
@@ -705,12 +706,19 @@ def review_marker(
     )
 
 
-def _latest_revision(session: Session, incident: IncidentSeries, episode: Episode) -> int:
+def _latest_revision(
+    session: Session,
+    incident: IncidentSeries,
+    episode: Episode,
+    *,
+    zone_kind: str,
+) -> int:
     return int(
         session.scalar(
             select(func.max(ActiveFireZoneRevision.revision)).where(
                 ActiveFireZoneRevision.incident_id == incident.id,
                 ActiveFireZoneRevision.episode_id == episode.id,
+                ActiveFireZoneRevision.zone_kind == zone_kind,
             )
         )
         or 0
@@ -807,6 +815,7 @@ def _create_revision(
     expected_latest_revision: int,
     valid_at: datetime,
     analysis_window: AgentAnalysisWindow | None,
+    zone_kind: str,
     geometry_geojson: dict[str, Any],
     geometry_origin: str,
     supporting_marker_ids: list[str],
@@ -815,7 +824,7 @@ def _create_revision(
     actor: Actor,
     trace_id: str,
 ) -> ActiveFireZoneRevision:
-    latest = _latest_revision(session, incident, episode)
+    latest = _latest_revision(session, incident, episode, zone_kind=zone_kind)
     if latest != expected_latest_revision:
         raise ConflictError(
             "active_zone_revision_conflict", "Active zone changed since the editor was loaded."
@@ -836,6 +845,7 @@ def _create_revision(
         select(ActiveFireZoneRevision).where(
             ActiveFireZoneRevision.incident_id == incident.id,
             ActiveFireZoneRevision.episode_id == episode.id,
+            ActiveFireZoneRevision.zone_kind == zone_kind,
             ActiveFireZoneRevision.revision == latest,
         )
     ).scalar_one_or_none()
@@ -844,6 +854,7 @@ def _create_revision(
         incident_id=incident.id,
         episode_id=episode.id,
         analysis_window_id=analysis_window.id if analysis_window is not None else None,
+        zone_kind=zone_kind,
         revision=latest + 1,
         valid_at=normalized_valid_at,
         geometry_geojson=normalized,
@@ -867,6 +878,7 @@ def _create_revision(
         trace_id=trace_id,
         after={
             "revision": revision.revision,
+            "zone_kind": revision.zone_kind,
             "review_state": revision.review_state.value,
             "analysis_id": analysis_window.analysis_id if analysis_window is not None else None,
         },
@@ -905,6 +917,7 @@ def create_zone_revision(
         expected_latest_revision=payload.expected_latest_revision,
         valid_at=payload.valid_at,
         analysis_window=analysis_window,
+        zone_kind=payload.zone_kind,
         geometry_geojson=payload.geometry_geojson,
         geometry_origin=payload.geometry_origin,
         supporting_marker_ids=payload.supporting_marker_ids,
@@ -943,6 +956,12 @@ def merge_zone_revisions(
         raise BadRequestError(
             "active_zone_merge_sources", "Every source revision must exist and be non-rejected."
         )
+    zone_kinds = {item.zone_kind for item in sources}
+    if len(zone_kinds) != 1:
+        raise BadRequestError(
+            "active_zone_merge_kind",
+            "Only revisions of the same zone kind can be merged.",
+        )
     geometries = [_normalize_geometry(item.geometry_geojson)[1] for item in sources]
     merged = unary_union(geometries)
     if isinstance(merged, Polygon):
@@ -962,6 +981,7 @@ def merge_zone_revisions(
         expected_latest_revision=payload.expected_latest_revision,
         valid_at=payload.valid_at,
         analysis_window=analysis_window,
+        zone_kind=next(iter(zone_kinds)),
         geometry_geojson=normalized,
         geometry_origin="DETERMINISTIC_UNION",
         supporting_marker_ids=payload.supporting_marker_ids,
