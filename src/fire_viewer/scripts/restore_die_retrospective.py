@@ -1,9 +1,9 @@
 """Restore the reviewed Die retrospective into the current public-day contract.
 
-The historical dataset is deliberately external to this repository.  This tool
-only accepts the already reviewed JSON snapshot, creates the missing immutable
-analysis windows/campaign-day gates, and preserves the two separate layers for
-each date: daily active area and cumulative burned footprint.
+This CLI accepts an already reviewed JSON snapshot, creates the missing
+immutable analysis windows/campaign-day gates, and preserves the two separate
+layers for each date: daily active area and cumulative burned footprint.  The
+production migration gate invokes it only with the immutable packaged manifest.
 
 Dry-run is the default.  Applying requires an explicit actor and a database
 URL supplied through the normal environment or an untracked env file.
@@ -16,7 +16,7 @@ import hashlib
 import json
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from dotenv import dotenv_values
 from sqlalchemy import func, select
@@ -58,7 +58,10 @@ def _sha256(value: Any) -> str:
 
 
 def _load_payload(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw_payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw_payload, dict):
+        raise RetrospectiveConflictError("The Die retrospective manifest must be an object.")
+    payload = cast(dict[str, Any], raw_payload)
     activity_zones = payload.get("activity_zones")
     reports = payload.get("reports")
     if (
@@ -156,9 +159,14 @@ def _ensure_reports(
         )
         if existing is not None:
             continue
-        revision = (session.scalar(select(func.max(AgentSituationReportRevision.revision).where(
-            AgentSituationReportRevision.analysis_window_id == window.id
-        ))) or 0) + 1
+        revision = (
+            session.scalar(
+                select(func.max(AgentSituationReportRevision.revision)).where(
+                    AgentSituationReportRevision.analysis_window_id == window.id
+                )
+            )
+            or 0
+        ) + 1
         session.add(
             AgentSituationReportRevision(
                 report_revision_id=f"report-{FIRE_ID.lower()}-{local_date.isoformat()}-retrospective-v2",
@@ -182,11 +190,16 @@ def _ensure_reports(
 
 
 def _next_revision(session: Session, incident_id: int, episode_id: int, zone_kind: str) -> int:
-    return (session.scalar(select(func.max(ActiveFireZoneRevision.revision).where(
-        ActiveFireZoneRevision.incident_id == incident_id,
-        ActiveFireZoneRevision.episode_id == episode_id,
-        ActiveFireZoneRevision.zone_kind == zone_kind,
-    ))) or 0) + 1
+    return (
+        session.scalar(
+            select(func.max(ActiveFireZoneRevision.revision)).where(
+                ActiveFireZoneRevision.incident_id == incident_id,
+                ActiveFireZoneRevision.episode_id == episode_id,
+                ActiveFireZoneRevision.zone_kind == zone_kind,
+            )
+        )
+        or 0
+    ) + 1
 
 
 def _has_ready_zone(session: Session, *, window_id: int, zone_kind: str) -> bool:
