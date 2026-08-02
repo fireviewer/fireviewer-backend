@@ -1,0 +1,52 @@
+{
+  "dataset_id": "trevillach-2026-retrospective-v1",
+  "campaign_id": "campaign-trevillach-retrospective-v1",
+  "identifier_suffix": "retrospective-v1",
+  "incident": {"fire_id": "FR-66-00001", "episode_id": "E01"},
+  "anchor": [2.5695396, 42.6683172],
+  "bbox": [2.4495396, 42.5483172, 2.6895396, 42.7883172],
+  "source_label": "Copernicus EFFIS — Rapid Damage Assessment, empreinte saisonnière 2026",
+  "source_url": "https://forest-fire.emergency.copernicus.eu/about-effis/technical-background/rapid-damage-assessment",
+  "days": [
+    {
+      "local_date": "2026-07-04",
+      "valid_at": "2026-07-04T23:00:00Z",
+      "area_ha": 300,
+      "title": "Départ de feu et première progression à Trévillach",
+      "summary": "Le feu se déclare en soirée. Le premier périmètre est reconstitué à partir du point de départ publié et de l’empreinte finale EFFIS.",
+      "source_urls": ["https://www.pyrenees-orientales.gouv.fr/Actualites/Incendie-a-Trevillach-point-de-situation"]
+    },
+    {
+      "local_date": "2026-07-05",
+      "valid_at": "2026-07-05T18:00:00Z",
+      "area_ha": 1037,
+      "title": "Front actif observé par Copernicus",
+      "summary": "Le produit Copernicus FEP du 5 juillet constate une importante surface brûlée et des flammes actives. Le calque suit cette progression dans le contour final EFFIS.",
+      "source_urls": ["https://mapping.emergency.copernicus.eu/activations/EMSR889/"]
+    },
+    {
+      "local_date": "2026-07-06",
+      "valid_at": "2026-07-06T12:00:00Z",
+      "area_ha": 4649,
+      "title": "Extension majeure du feu dans les Pyrénées-Orientales",
+      "summary": "Le bilan opérationnel du 6 juillet porte la zone parcourue à 4 649 hectares. La zone active est la croissance reconstituée entre les bilans quotidiens.",
+      "source_urls": ["https://www.pyrenees-orientales.gouv.fr/Actualites/Incendie-a-Trevillach-point-de-situation"]
+    },
+    {
+      "local_date": "2026-07-07",
+      "valid_at": "2026-07-07T18:00:00Z",
+      "area_ha": 4700,
+      "title": "Progression ralentie sous surveillance",
+      "summary": "Le contour cumulé est poursuivi à partir de l’empreinte satellite finale et du bilan de progression journalier reconstitué.",
+      "source_urls": ["https://mapping.emergency.copernicus.eu/activations/EMSR889/"]
+    },
+    {
+      "local_date": "2026-07-08",
+      "valid_at": "2026-07-08T21:20:00Z",
+      "area_ha": 4743,
+      "title": "Empreinte finale Copernicus disponible",
+      "summary": "Le produit Copernicus GRA du 8 juillet fournit l’empreinte finale de référence. La zone active est limitée au dernier accroissement documenté.",
+      "source_urls": ["https://mapping.emergency.copernicus.eu/activations/EMSR889/"]
+    }
+  ]
+}

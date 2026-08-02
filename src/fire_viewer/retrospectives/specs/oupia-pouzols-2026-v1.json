@@ -1,0 +1,20 @@
+{
+  "dataset_id": "oupia-pouzols-2026-retrospective-v1",
+  "campaign_id": "campaign-oupia-pouzols-retrospective-v1",
+  "identifier_suffix": "retrospective-v1",
+  "incident": {"fire_id": "FR-34-00001", "episode_id": "E01"},
+  "anchor": [2.762352, 43.299972],
+  "bbox": [2.642352, 43.179972, 2.882352, 43.419972],
+  "source_label": "Copernicus EFFIS — Rapid Damage Assessment, empreinte saisonnière 2026",
+  "source_url": "https://forest-fire.emergency.copernicus.eu/about-effis/technical-background/rapid-damage-assessment",
+  "days": [
+    {
+      "local_date": "2026-07-01",
+      "valid_at": "2026-07-01T22:52:00Z",
+      "area_ha": 950,
+      "title": "Feu d’Oupia propagé vers Pouzols-Minervois",
+      "summary": "L’incendie parti d’Oupia traverse vers l’Aude et atteint environ 950 hectares. La zone active montre la progression du 1er juillet dans l’empreinte saisonnière EFFIS.",
+      "source_urls": ["https://www.ladepeche.fr/2026/07/01/direct-incendie-dans-laude-les-flammes-ont-deja-parcouru-600-hectares-dimportants-moyens-deployes-et-plusieurs-communes-evacuees-13448063.php"]
+    }
+  ]
+}

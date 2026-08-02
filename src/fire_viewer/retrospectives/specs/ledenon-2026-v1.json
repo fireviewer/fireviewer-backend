@@ -1,0 +1,20 @@
+{
+  "dataset_id": "ledenon-2026-retrospective-v1",
+  "campaign_id": "campaign-ledenon-retrospective-v1",
+  "identifier_suffix": "retrospective-v1",
+  "incident": {"fire_id": "FR-30-00001", "episode_id": "E01"},
+  "anchor": [4.503627, 43.92306],
+  "bbox": [4.383627, 43.80306, 4.623627, 44.04306],
+  "source_label": "Copernicus EFFIS — Rapid Damage Assessment, empreinte saisonnière 2026",
+  "source_url": "https://forest-fire.emergency.copernicus.eu/about-effis/technical-background/rapid-damage-assessment",
+  "days": [
+    {
+      "local_date": "2026-07-05",
+      "valid_at": "2026-07-05T19:21:00Z",
+      "area_ha": 540,
+      "title": "Propagation rapide entre Lédenon, Bezouce et Cabrières",
+      "summary": "Le feu, déclaré le 5 juillet, parcourt plus de 540 hectares dans la journée. Le calque actif correspond à la progression documentée de cette première journée.",
+      "source_urls": ["https://fr-alert.gouv.fr/les-alertes/FR-ALERT.1783509499.90000.0"]
+    }
+  ]
+}

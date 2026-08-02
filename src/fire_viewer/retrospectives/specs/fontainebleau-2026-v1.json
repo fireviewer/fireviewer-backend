@@ -1,0 +1,44 @@
+{
+  "dataset_id": "fontainebleau-2026-retrospective-v1",
+  "campaign_id": "campaign-fontainebleau-retrospective-v1",
+  "identifier_suffix": "retrospective-v1",
+  "incident": {"fire_id": "FR-77-00001", "episode_id": "E01"},
+  "anchor": [2.588886, 48.3894574],
+  "bbox": [2.468886, 48.2694574, 2.708886, 48.5094574],
+  "source_label": "Copernicus EFFIS — Rapid Damage Assessment, empreinte saisonnière 2026",
+  "source_url": "https://forest-fire.emergency.copernicus.eu/about-effis/technical-background/rapid-damage-assessment",
+  "days": [
+    {
+      "local_date": "2026-07-12",
+      "valid_at": "2026-07-12T23:00:00Z",
+      "area_ha": 300,
+      "title": "Départ de feu dans la forêt de Fontainebleau",
+      "summary": "Le feu se déclare en fin d’après-midi près de Noisy-sur-École. Le premier périmètre est contraint par le bilan de plus de 300 hectares et l’empreinte finale EFFIS.",
+      "source_urls": ["https://www.gendarmerie.interieur.gouv.fr/gendinfo/actualites/2026/incendie-de-fontainebleau-une-reponse-globale-de-la-gendarmerie"]
+    },
+    {
+      "local_date": "2026-07-13",
+      "valid_at": "2026-07-13T17:11:00Z",
+      "area_ha": 800,
+      "title": "Feu encore actif et extension de l’empreinte",
+      "summary": "Les interventions se poursuivent tandis que le feu dépasse 800 hectares. Copernicus observe alors des fronts et des flammes actives.",
+      "source_urls": ["https://mapping.emergency.copernicus.eu/activations/EMSR894/"]
+    },
+    {
+      "local_date": "2026-07-14",
+      "valid_at": "2026-07-14T20:02:00Z",
+      "area_ha": 1300,
+      "title": "Consolidation du périmètre et activité résiduelle",
+      "summary": "Le calque actif représente l’extension reconstituée entre les observations Copernicus successives et les bilans publics retenus.",
+      "source_urls": ["https://mapping.emergency.copernicus.eu/activations/EMSR894/"]
+    },
+    {
+      "local_date": "2026-07-15",
+      "valid_at": "2026-07-15T20:00:00Z",
+      "area_ha": 2000,
+      "title": "Périmètre majeur sous surveillance",
+      "summary": "La zone parcourue atteint l’ordre de grandeur final documenté. La zone active isole le dernier accroissement reconstitué du cycle initial.",
+      "source_urls": ["https://www.iledefrance.fr/presse/incendie-en-foret-de-fontainebleau-la-region-ile-de-france-lance-un-plan-daction-pour-les-forets-franciliennes"]
+    }
+  ]
+}

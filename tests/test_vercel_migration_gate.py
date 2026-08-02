@@ -150,3 +150,44 @@ def test_die_retrospective_restoration_uses_only_the_packaged_manifest(
             True,
         )
     ]
+
+
+def test_packaged_retrospective_restoration_is_disabled_without_explicit_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("FV_RESTORE_PACKAGED_RETROSPECTIVES", raising=False)
+
+    migrate_vercel._restore_packaged_retrospectives_if_requested(object(), tmp_path)
+
+
+def test_packaged_retrospective_restoration_uses_all_reviewed_manifests(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FV_RESTORE_PACKAGED_RETROSPECTIVES", "1")
+    retrospective_root = tmp_path / "src" / "fire_viewer" / "retrospectives"
+    payloads = {
+        retrospective_root / dataset_name: {"dataset_id": dataset_name.removesuffix(".json")}
+        for dataset_name in migrate_vercel._PACKAGED_RETROSPECTIVE_DATASETS
+    }
+    calls: list[dict[str, str]] = []
+
+    class FakeSession:
+        def __enter__(self) -> object:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(migrate_vercel, "Session", lambda *, bind: FakeSession())
+    monkeypatch.setattr(migrate_vercel, "_load_payload", payloads.__getitem__)
+    monkeypatch.setattr(
+        migrate_vercel,
+        "restore",
+        lambda _session, payload, *, actor, apply: calls.append(payload) or {"mode": "applied"},
+    )
+
+    migrate_vercel._restore_packaged_retrospectives_if_requested(object(), tmp_path)
+
+    assert calls == list(payloads.values())

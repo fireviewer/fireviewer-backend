@@ -17,6 +17,13 @@ from fire_viewer.scripts.restore_die_retrospective import _load_payload, restore
 
 _PRODUCTION = "production"
 _LOCK_KEY = 2_026_072_800_001
+_PACKAGED_RETROSPECTIVE_DATASETS = (
+    "ledenon-2026-v1.json",
+    "oupia-pouzols-2026-v1.json",
+    "taradeau-2026-v1.json",
+    "trevillach-2026-v1.json",
+    "fontainebleau-2026-v1.json",
+)
 
 
 def _project_root() -> Path:
@@ -51,6 +58,29 @@ def _restore_die_retrospective_if_requested(engine: Engine, project_root: Path) 
     )
 
 
+def _restore_packaged_retrospectives_if_requested(engine: Engine, project_root: Path) -> None:
+    """Restore reviewed daily layer pairs only when an operator enables the gate."""
+
+    if os.environ.get("FV_RESTORE_PACKAGED_RETROSPECTIVES") != "1":
+        return
+
+    retrospective_root = project_root / "src" / "fire_viewer" / "retrospectives"
+    with Session(bind=engine) as session:
+        results = [
+            restore(
+                session,
+                _load_payload(retrospective_root / dataset_name),
+                actor="fireviewer-retrospective-recovery",
+                apply=True,
+            )
+            for dataset_name in _PACKAGED_RETROSPECTIVE_DATASETS
+        ]
+    print(
+        "FireViewer packaged retrospective restoration: "
+        + json.dumps(results, ensure_ascii=False, sort_keys=True)
+    )
+
+
 def _upgrade_postgresql(
     database_url: str,
     config: Config,
@@ -75,6 +105,7 @@ def _upgrade_postgresql(
                     "Production migration finished on an unexpected schema revision"
                 )
         _restore_die_retrospective_if_requested(engine, project_root)
+        _restore_packaged_retrospectives_if_requested(engine, project_root)
     finally:
         engine.dispose()
 

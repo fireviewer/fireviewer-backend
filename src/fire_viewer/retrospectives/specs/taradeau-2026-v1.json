@@ -1,0 +1,28 @@
+{
+  "dataset_id": "taradeau-2026-retrospective-v1",
+  "campaign_id": "campaign-taradeau-retrospective-v1",
+  "identifier_suffix": "retrospective-v1",
+  "incident": {"fire_id": "FR-83-00001", "episode_id": "E01"},
+  "anchor": [6.4328586, 43.4506671],
+  "bbox": [6.3128586, 43.3306671, 6.5528586, 43.5706671],
+  "source_label": "Copernicus EFFIS — Rapid Damage Assessment, empreinte saisonnière 2026",
+  "source_url": "https://forest-fire.emergency.copernicus.eu/about-effis/technical-background/rapid-damage-assessment",
+  "days": [
+    {
+      "local_date": "2026-07-19",
+      "valid_at": "2026-07-19T22:30:00Z",
+      "area_ha": 200,
+      "title": "Propagation du feu de Taradeau vers Les Arcs",
+      "summary": "Le feu progresse par sautes vers Les Arcs-sur-Argens et parcourt près de 200 hectares. La zone active représente l’extension de la journée du 19 juillet.",
+      "source_urls": ["https://www.var.gouv.fr/Actualites/Salle-de-presse/Communiques-de-presse/2026"]
+    },
+    {
+      "local_date": "2026-07-20",
+      "valid_at": "2026-07-20T19:57:00Z",
+      "area_ha": 230,
+      "title": "Reprises traitées et stabilisation du périmètre",
+      "summary": "Les secours traitent des reprises. La zone active correspond à l’extension résiduelle entre le bilan initial et l’empreinte satellite finale disponible.",
+      "source_urls": ["https://www.tf1.fr/tf1/jt-20h/videos/incendie-dans-le-var-des-maisons-entieres-brulees-84065855.html"]
+    }
+  ]
+}
