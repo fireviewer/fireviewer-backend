@@ -205,6 +205,13 @@ def _project_geometry(
     coordinates = geometry.get("coordinates")
     if not isinstance(coordinates, list):
         return []
+    geometry_type = geometry.get("type")
+    if geometry_type == "Polygon":
+        polygons = [coordinates]
+    elif geometry_type == "MultiPolygon":
+        polygons = coordinates
+    else:
+        return []
     projected: list[list[list[tuple[float, float, float]]]] = []
 
     def project(point: list[float]) -> tuple[float, float, float]:
@@ -212,9 +219,18 @@ def _project_geometry(
         assert value is not None
         return value
 
-    for polygon in coordinates:
+    for polygon in polygons:
+        if not isinstance(polygon, list):
+            return []
         projected_polygon: list[list[tuple[float, float, float]]] = []
         for ring in polygon:
+            if not isinstance(ring, list):
+                return []
+            if any(
+                not isinstance(point, (list, tuple)) or len(point) < 2
+                for point in ring
+            ):
+                return []
             projected_polygon.append([project(point) for point in ring])
         projected.append(projected_polygon)
     return projected

@@ -18,6 +18,7 @@ from fire_viewer.domain.enums import (
     IncidentMarkerReviewState,
 )
 from fire_viewer.domain.spatial import derive_raf20_origin
+from fire_viewer.services.incident_spatial_review import _project_geometry
 
 
 def _square(west: float, south: float, east: float, north: float) -> dict[str, object]:
@@ -33,6 +34,18 @@ def _square(west: float, south: float, east: float, north: float) -> dict[str, o
             ]
         ],
     }
+
+
+def test_project_geometry_accepts_polygon_and_multipolygon() -> None:
+    origin = (6.0214, 43.2897, 400.0)
+    polygon = _square(6.02, 43.28, 6.03, 43.29)
+    multi_polygon = {"type": "MultiPolygon", "coordinates": [polygon["coordinates"]]}
+
+    for geometry in (polygon, multi_polygon):
+        projected = _project_geometry(geometry, origin)
+        assert len(projected) == 1
+        assert len(projected[0]) == 1
+        assert len(projected[0][0]) == 5
 
 
 def test_admin_3d_workspace_edits_merges_and_approves_without_publishing(
