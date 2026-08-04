@@ -340,3 +340,116 @@ class ReviewResolutionAction(StrEnum):
     ATTACH = "attach"
     CREATE = "create"
     REJECT = "reject"
+
+
+class IncidentCandidateState(StrEnum):
+    PRIVATE_MATCHING = "PRIVATE_MATCHING"
+    CONFIRMED = "CONFIRMED"
+    MERGED = "MERGED"
+    REJECTED = "REJECTED"
+
+
+class EventCandidateState(StrEnum):
+    RECEIVED = "RECEIVED"
+    QUEUED = "QUEUED"
+    ANALYZING = "ANALYZING"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    ABSTAINED = "ABSTAINED"
+    FAILED = "FAILED"
+    VALIDATED = "VALIDATED"
+    REJECTED = "REJECTED"
+
+
+class EventAnalysisJobState(StrEnum):
+    QUEUED = "QUEUED"
+    SUBMITTING = "SUBMITTING"
+    AWAITING_REMOTE = "AWAITING_REMOTE"
+    COMPLETED = "COMPLETED"
+    ABSTAINED = "ABSTAINED"
+    FAILED = "FAILED"
+
+
+class FireActivityEventState(StrEnum):
+    DRAFT = "DRAFT"
+    ANALYST_VALIDATED = "ANALYST_VALIDATED"
+    EDITOR_PUBLISHED = "EDITOR_PUBLISHED"
+    SUPERSEDED = "SUPERSEDED"
+    RETRACTED = "RETRACTED"
+
+
+class ViewpointOrigin(StrEnum):
+    USER_PLACED = "USER_PLACED"
+    DEVICE_GPS = "DEVICE_GPS"
+    NAMED_PLACE = "NAMED_PLACE"
+    OFFICIAL_SOURCE = "OFFICIAL_SOURCE"
+
+
+class EvidenceAssetState(StrEnum):
+    PENDING_UPLOAD = "PENDING_UPLOAD"
+    UPLOADED = "UPLOADED"
+    QUARANTINED = "QUARANTINED"
+    VERIFIED = "VERIFIED"
+    REJECTED = "REJECTED"
+    PURGED = "PURGED"
+
+
+class MalwareScanState(StrEnum):
+    PENDING = "PENDING"
+    CLEAN = "CLEAN"
+    INFECTED = "INFECTED"
+    FAILED = "FAILED"
+
+
+class LocalizationAttemptState(StrEnum):
+    PROPOSED = "PROPOSED"
+    SHADOW = "SHADOW"
+    SECTOR = "SECTOR"
+    ABSTAINED = "ABSTAINED"
+    FAILED = "FAILED"
+    REVIEWED = "REVIEWED"
+
+
+class ExternalArtifactStatus(StrEnum):
+    PROVISIONAL = "PROVISIONAL"
+    VALIDATED = "VALIDATED"
+    CORRECTED = "CORRECTED"
+    RETRACTED = "RETRACTED"
+
+
+class ExternalSemanticRole(StrEnum):
+    RAW_EARTH_OBSERVATION = "raw_earth_observation"
+    SENSOR_DETECTION = "sensor_detection"
+    INTERPRETED_OBSERVATION = "interpreted_observation"
+    OFFICIAL_INCIDENT_STATEMENT = "official_incident_statement"
+    WEATHER_OBSERVATION = "weather_observation"
+    WEATHER_FORECAST = "weather_forecast"
+    GEOSPATIAL_REFERENCE = "geospatial_reference"
+    HISTORICAL_REGISTRY = "historical_registry"
+    SIMULATION = "simulation"
+
+
+class ExternalLineageRelation(StrEnum):
+    DERIVED_FROM = "derived_from"
+    SAME_ACQUISITION_AS = "same_acquisition_as"
+    SUPERSEDES = "supersedes"
+    RETRACTS = "retracts"
+    MIRRORS = "mirrors"
+    CONFLICTS_WITH = "conflicts_with"
+    USES_RESTRICTED_ASSET = "uses_restricted_asset"
+
+
+class EventRelationKind(StrEnum):
+    IDENTITY = "identity"
+    SUCCESSION = "succession"
+    CONTRADICTION = "contradiction"
+    MERGE = "merge"
+    SPLIT = "split"
+
+
+class ProgressionDeltaKind(StrEnum):
+    APPEARANCE = "appearance"
+    EXTENSION = "extension"
+    MOVEMENT = "movement"
+    CONTRACTION = "contraction"
+    REACTIVATION = "reactivation"
+    EXTINCTION = "extinction"

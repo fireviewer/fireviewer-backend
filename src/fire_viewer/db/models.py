@@ -47,12 +47,24 @@ from fire_viewer.domain.enums import (
     AgentValidationCampaignDayState,
     AssetLod,
     AssetState,
+    EventAnalysisJobState,
+    EventCandidateState,
+    EventRelationKind,
+    EvidenceAssetState,
     EvidenceSpatialMode,
+    ExternalArtifactStatus,
+    ExternalLineageRelation,
+    ExternalSemanticRole,
+    FireActivityEventState,
+    IncidentCandidateState,
     IncidentMarkerReviewState,
     IncidentStatus,
     JobKind,
     JobState,
+    LocalizationAttemptState,
+    MalwareScanState,
     MatchDecision,
+    ProgressionDeltaKind,
     PublicContributionKind,
     PublicContributionState,
     PublicReportCategory,
@@ -63,6 +75,7 @@ from fire_viewer.domain.enums import (
     SpatialPackageFileKind,
     SpatialPackageState,
     VerificationState,
+    ViewpointOrigin,
     ZoneContributionState,
     ZoneInformationState,
     ZonePublicationState,
@@ -2772,6 +2785,731 @@ class ZoneArchiveSnapshot(Base):
         CheckConstraint(sha256_hex_check("asset_sha256"), name="ck_zone_archive_asset_sha256"),
         CheckConstraint("lower(image_url) NOT LIKE '%.glb%'", name="ck_zone_archive_not_glb"),
         CheckConstraint("lower(image_url) LIKE '%.png'", name="ck_zone_archive_png_url"),
+    )
+
+
+class IncidentCandidate(Base, TimestampMixin):
+    """Private incident dossier pending human matching or confirmation."""
+
+    __tablename__ = "incident_candidate"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    state: Mapped[IncidentCandidateState] = mapped_column(
+        enum_column(IncidentCandidateState, name="incident_candidate_state"),
+        nullable=False,
+        default=IncidentCandidateState.PRIVATE_MATCHING,
+        index=True,
+    )
+    origin_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_by_subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    matched_incident_id: Mapped[int | None] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), index=True
+    )
+    reference_lon: Mapped[float | None] = mapped_column(Float)
+    reference_lat: Mapped[float | None] = mapped_column(Float)
+    horizontal_accuracy_m: Mapped[float | None] = mapped_column(Float)
+    source_statement_revision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("external_artifact_revision.id", ondelete="RESTRICT"),
+        unique=True,
+        index=True,
+    )
+    resolution_reason: Mapped[str | None] = mapped_column(String(1_000))
+    resolved_by: Mapped[str | None] = mapped_column(String(255))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    __table_args__ = (
+        CheckConstraint(
+            "origin_kind IN ('CONTRIBUTION', 'OFFICIAL_STATEMENT')",
+            name="ck_incident_candidate_origin",
+        ),
+        CheckConstraint(
+            "(reference_lon IS NULL AND reference_lat IS NULL) OR "
+            "(reference_lon BETWEEN -180 AND 180 AND reference_lat BETWEEN -90 AND 90)",
+            name="ck_incident_candidate_coordinates",
+        ),
+        CheckConstraint(
+            "horizontal_accuracy_m IS NULL OR horizontal_accuracy_m > 0",
+            name="ck_incident_candidate_accuracy",
+        ),
+        CheckConstraint(
+            "origin_kind != 'OFFICIAL_STATEMENT' OR source_statement_revision_id IS NOT NULL",
+            name="ck_incident_candidate_official_source",
+        ),
+        CheckConstraint("version >= 1", name="ck_incident_candidate_version"),
+    )
+
+
+class Viewpoint(Base, TimestampMixin):
+    """Exact contributor viewpoint. This table is private by contract."""
+
+    __tablename__ = "viewpoint"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    viewpoint_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    owner_subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    longitude: Mapped[float] = mapped_column(Float, nullable=False)
+    latitude: Mapped[float] = mapped_column(Float, nullable=False)
+    horizontal_accuracy_m: Mapped[float] = mapped_column(Float, nullable=False)
+    altitude_m: Mapped[float | None] = mapped_column(Float)
+    label: Mapped[str | None] = mapped_column(String(255))
+    yaw_deg: Mapped[float | None] = mapped_column(Float)
+    fov_deg: Mapped[float | None] = mapped_column(Float)
+    origin: Mapped[ViewpointOrigin] = mapped_column(
+        enum_column(ViewpointOrigin, name="viewpoint_origin"), nullable=False
+    )
+    public_derivative_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        CheckConstraint("longitude BETWEEN -180 AND 180", name="ck_viewpoint_lon"),
+        CheckConstraint("latitude BETWEEN -90 AND 90", name="ck_viewpoint_lat"),
+        CheckConstraint("horizontal_accuracy_m > 0", name="ck_viewpoint_accuracy"),
+        CheckConstraint(
+            "yaw_deg IS NULL OR yaw_deg >= 0 AND yaw_deg < 360", name="ck_viewpoint_yaw"
+        ),
+        CheckConstraint(
+            "fov_deg IS NULL OR fov_deg > 0 AND fov_deg < 180", name="ck_viewpoint_fov"
+        ),
+    )
+
+
+class EventCandidate(Base, TimestampMixin):
+    __tablename__ = "event_candidate"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    owner_subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    incident_id: Mapped[int | None] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), index=True
+    )
+    incident_candidate_id: Mapped[int | None] = mapped_column(
+        ForeignKey("incident_candidate.id", ondelete="RESTRICT"), index=True
+    )
+    viewpoint_id: Mapped[int] = mapped_column(
+        ForeignKey("viewpoint.id", ondelete="RESTRICT"), nullable=False, unique=True, index=True
+    )
+    state: Mapped[EventCandidateState] = mapped_column(
+        enum_column(EventCandidateState, name="event_candidate_state"),
+        nullable=False,
+        default=EventCandidateState.RECEIVED,
+        index=True,
+    )
+    observed_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    observed_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    message: Mapped[str | None] = mapped_column(Text)
+    consent_analysis: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    consent_retention: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    consent_public_derivative: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    analysis_outbox_event_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    state_history: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    review_message: Mapped[str | None] = mapped_column(Text)
+    review_context: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    failure_code: Mapped[str | None] = mapped_column(String(128))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_subject", "idempotency_key", name="uq_event_candidate_owner_idempotency"
+        ),
+        CheckConstraint(
+            "(incident_id IS NOT NULL AND incident_candidate_id IS NULL) OR "
+            "(incident_id IS NULL AND incident_candidate_id IS NOT NULL)",
+            name="ck_event_candidate_incident_target",
+        ),
+        CheckConstraint(
+            "observed_end_at IS NULL OR observed_end_at >= observed_start_at",
+            name="ck_event_candidate_time_window",
+        ),
+        CheckConstraint("consent_analysis", name="ck_event_candidate_analysis_consent"),
+        CheckConstraint("consent_retention", name="ck_event_candidate_retention_consent"),
+        CheckConstraint("version >= 1", name="ck_event_candidate_version"),
+    )
+
+
+class EventAnalysisJob(Base, TimestampMixin):
+    """Durable, at-most-once dispatch state for one event candidate."""
+
+    __tablename__ = "event_analysis_job"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    event_candidate_id: Mapped[int] = mapped_column(
+        ForeignKey("event_candidate.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    outbox_event_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    state: Mapped[EventAnalysisJobState] = mapped_column(
+        enum_column(EventAnalysisJobState, name="event_analysis_job_state"),
+        nullable=False,
+        default=EventAnalysisJobState.QUEUED,
+        index=True,
+    )
+    remote_job_id: Mapped[str | None] = mapped_column(String(255), unique=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(255), index=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    next_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    submission_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result_sha256: Mapped[str | None] = mapped_column(String(64))
+    result_summary: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    last_error_code: Mapped[str | None] = mapped_column(String(128))
+    last_error_detail: Mapped[str | None] = mapped_column(String(1_000))
+
+    __table_args__ = (
+        CheckConstraint("attempts >= 0", name="ck_event_analysis_job_attempts"),
+        CheckConstraint(
+            "result_sha256 IS NULL OR length(result_sha256) = 64",
+            name="ck_event_analysis_job_result_hash",
+        ),
+        CheckConstraint(
+            "state != 'AWAITING_REMOTE' OR remote_job_id IS NOT NULL",
+            name="ck_event_analysis_job_remote_id",
+        ),
+    )
+
+
+class EvidenceAsset(Base, TimestampMixin):
+    __tablename__ = "evidence_asset"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    owner_subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    event_candidate_id: Mapped[int | None] = mapped_column(
+        ForeignKey("event_candidate.id", ondelete="RESTRICT"), index=True
+    )
+    upload_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    object_uri: Mapped[str] = mapped_column(String(2_048), nullable=False, unique=True)
+    declared_media_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    detected_media_type: Mapped[str | None] = mapped_column(String(128))
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    state: Mapped[EvidenceAssetState] = mapped_column(
+        enum_column(EvidenceAssetState, name="evidence_asset_state"),
+        nullable=False,
+        default=EvidenceAssetState.PENDING_UPLOAD,
+        index=True,
+    )
+    malware_scan_state: Mapped[MalwareScanState] = mapped_column(
+        enum_column(MalwareScanState, name="malware_scan_state"),
+        nullable=False,
+        default=MalwareScanState.PENDING,
+    )
+    metadata_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+    __table_args__ = (
+        CheckConstraint("size_bytes > 0", name="ck_evidence_asset_size"),
+        CheckConstraint(
+            "sha256 IS NULL OR length(sha256) = 64", name="ck_evidence_asset_sha256_length"
+        ),
+    )
+
+
+class LocalizationAttempt(Base, TimestampMixin):
+    __tablename__ = "localization_attempt"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    attempt_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    event_candidate_id: Mapped[int] = mapped_column(
+        ForeignKey("event_candidate.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    state: Mapped[LocalizationAttemptState] = mapped_column(
+        enum_column(LocalizationAttemptState, name="localization_attempt_state"), nullable=False
+    )
+    method: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_id: Mapped[str | None] = mapped_column(String(255))
+    model_revision: Mapped[str | None] = mapped_column(String(255))
+    view_profile: Mapped[str] = mapped_column(String(64), nullable=False)
+    anchor_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    geometry_geojson: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    uncertainty_geojson: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    horizontal_uncertainty_m: Mapped[float | None] = mapped_column(Float)
+    abstention_reason: Mapped[str | None] = mapped_column(String(1_000))
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        CheckConstraint(
+            "horizontal_uncertainty_m IS NULL OR horizontal_uncertainty_m > 0",
+            name="ck_localization_attempt_uncertainty",
+        ),
+        CheckConstraint(
+            "state != 'PROPOSED' OR geometry_geojson IS NOT NULL",
+            name="ck_localization_attempt_result",
+        ),
+        CheckConstraint(
+            "state != 'ABSTAINED' OR abstention_reason IS NOT NULL",
+            name="ck_localization_attempt_abstention",
+        ),
+    )
+
+
+class FireActivityEvent(Base, TimestampMixin):
+    __tablename__ = "fire_activity_event"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    incident_id: Mapped[int] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    episode_id: Mapped[int] = mapped_column(
+        ForeignKey("episode.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    source_candidate_id: Mapped[int | None] = mapped_column(
+        ForeignKey("event_candidate.id", ondelete="RESTRICT"), index=True
+    )
+    localization_attempt_id: Mapped[int | None] = mapped_column(
+        ForeignKey("localization_attempt.id", ondelete="RESTRICT"), index=True
+    )
+    state: Mapped[FireActivityEventState] = mapped_column(
+        enum_column(FireActivityEventState, name="fire_activity_event_state"),
+        nullable=False,
+        default=FireActivityEventState.DRAFT,
+        index=True,
+    )
+    phenomenon_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    observed_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    observed_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    geometry_geojson: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    uncertainty_geojson: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    method: Mapped[str] = mapped_column(String(128), nullable=False)
+    analyst_validated_by: Mapped[str | None] = mapped_column(String(255))
+    analyst_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    editor_published_by: Mapped[str | None] = mapped_column(String(255))
+    editor_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    supersedes_event_id: Mapped[int | None] = mapped_column(
+        ForeignKey("fire_activity_event.id", ondelete="RESTRICT"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    __table_args__ = (
+        CheckConstraint(
+            "phenomenon_kind IN ('active_fire', 'visible_front', 'smoke_origin', "
+            "'thermal_hotspot')",
+            name="ck_fire_activity_event_kind",
+        ),
+        CheckConstraint(
+            "observed_end_at IS NULL OR observed_end_at >= observed_start_at",
+            name="ck_fire_activity_event_time_window",
+        ),
+        CheckConstraint("version >= 1", name="ck_fire_activity_event_version"),
+    )
+
+
+class FireActivityEventEvidence(Base, TimestampMixin):
+    """Normalized proof link; evidence identifiers are not embedded in JSON."""
+
+    __tablename__ = "fire_activity_event_evidence"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fire_activity_event_id: Mapped[int] = mapped_column(
+        ForeignKey("fire_activity_event.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    evidence_asset_id: Mapped[int] = mapped_column(
+        ForeignKey("evidence_asset.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="support")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "fire_activity_event_id",
+            "evidence_asset_id",
+            name="uq_fire_activity_event_evidence",
+        ),
+    )
+
+
+class EventRelation(Base, TimestampMixin):
+    __tablename__ = "event_relation"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    relation_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    source_event_id: Mapped[int] = mapped_column(
+        ForeignKey("fire_activity_event.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    target_event_id: Mapped[int] = mapped_column(
+        ForeignKey("fire_activity_event.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    kind: Mapped[EventRelationKind] = mapped_column(
+        enum_column(EventRelationKind, name="event_relation_kind"), nullable=False
+    )
+    reason: Mapped[str] = mapped_column(String(1_000), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_event_id", "target_event_id", "kind", name="uq_event_relation_pair_kind"
+        ),
+        CheckConstraint("source_event_id != target_event_id", name="ck_event_relation_distinct"),
+    )
+
+
+class ActivityEnvelopeRevision(Base, TimestampMixin):
+    __tablename__ = "activity_envelope_revision"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    envelope_id: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    incident_id: Mapped[int] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    episode_id: Mapped[int] = mapped_column(
+        ForeignKey("episode.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    effective_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    effective_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    geometry_geojson: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    uncertainty_geojson: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    method: Mapped[str] = mapped_column(String(128), nullable=False)
+    resolution_m: Mapped[float] = mapped_column(Float, nullable=False)
+    review_state: Mapped[str] = mapped_column(String(32), nullable=False, default="DRAFT")
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("envelope_id", "revision", name="uq_activity_envelope_revision"),
+        CheckConstraint("revision >= 1", name="ck_activity_envelope_revision"),
+        CheckConstraint("resolution_m > 0", name="ck_activity_envelope_resolution"),
+    )
+
+
+class ActivityEnvelopeSupport(Base, TimestampMixin):
+    """Normalized support edge from an envelope revision to a validated event."""
+
+    __tablename__ = "activity_envelope_support"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    envelope_revision_id: Mapped[int] = mapped_column(
+        ForeignKey("activity_envelope_revision.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    fire_activity_event_id: Mapped[int] = mapped_column(
+        ForeignKey("fire_activity_event.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    support_role: Mapped[str] = mapped_column(String(32), nullable=False, default="observation")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "envelope_revision_id",
+            "fire_activity_event_id",
+            name="uq_activity_envelope_support",
+        ),
+    )
+
+
+class ProgressionDelta(Base, TimestampMixin):
+    __tablename__ = "progression_delta"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    delta_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    incident_id: Mapped[int] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    from_envelope_revision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("activity_envelope_revision.id", ondelete="RESTRICT"), index=True
+    )
+    to_envelope_revision_id: Mapped[int] = mapped_column(
+        ForeignKey("activity_envelope_revision.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    kind: Mapped[ProgressionDeltaKind] = mapped_column(
+        enum_column(ProgressionDeltaKind, name="progression_delta_kind"), nullable=False
+    )
+    geometry_geojson: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    observed_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    observed_end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    method: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("observed_end_at >= observed_start_at", name="ck_progression_delta_time"),
+        CheckConstraint(
+            "from_envelope_revision_id IS NULL OR "
+            "from_envelope_revision_id != to_envelope_revision_id",
+            name="ck_progression_delta_distinct",
+        ),
+    )
+
+
+class PublicationSnapshot(Base):
+    """Immutable public projection; private viewpoint fields are forbidden by service policy."""
+
+    __tablename__ = "publication_snapshot"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    incident_id: Mapped[int] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    public_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    published_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    supersedes_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("publication_snapshot.id", ondelete="RESTRICT"), index=True
+    )
+    retracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retracted_by: Mapped[str | None] = mapped_column(String(255))
+    retraction_reason: Mapped[str | None] = mapped_column(String(1_000))
+
+    __table_args__ = (
+        UniqueConstraint("incident_id", "revision", name="uq_publication_snapshot_revision"),
+        CheckConstraint("revision >= 1", name="ck_publication_snapshot_revision"),
+        CheckConstraint(sha256_hex_check("payload_sha256"), name="ck_publication_snapshot_sha256"),
+    )
+
+
+class ExternalProvider(Base, TimestampMixin):
+    __tablename__ = "external_provider"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider_key: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    allowed_domains: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    authentication_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    attribution: Mapped[str] = mapped_column(String(1_000), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        CheckConstraint("length(trim(attribution)) > 0", name="ck_external_provider_attribution"),
+    )
+
+
+class ExternalCollection(Base, TimestampMixin):
+    __tablename__ = "external_collection"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider_id: Mapped[int] = mapped_column(
+        ForeignKey("external_provider.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    collection_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    product_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    sensor: Mapped[str | None] = mapped_column(String(128))
+    platform: Mapped[str | None] = mapped_column(String(128))
+    license: Mapped[str] = mapped_column(String(1_000), nullable=False)
+    cadence_seconds: Mapped[int | None] = mapped_column(Integer)
+    semantic_role: Mapped[ExternalSemanticRole] = mapped_column(
+        enum_column(ExternalSemanticRole, name="external_semantic_role"), nullable=False
+    )
+    configuration: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        UniqueConstraint("provider_id", "collection_key", name="uq_external_collection_key"),
+        CheckConstraint("length(trim(license)) > 0", name="ck_external_collection_license"),
+        CheckConstraint(
+            "cadence_seconds IS NULL OR cadence_seconds > 0", name="ck_external_collection_cadence"
+        ),
+    )
+
+
+class ExternalArtifactRevision(Base, TimestampMixin):
+    __tablename__ = "external_artifact_revision"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    artifact_revision_id: Mapped[str] = mapped_column(
+        String(96), nullable=False, unique=True, index=True
+    )
+    collection_id: Mapped[int] = mapped_column(
+        ForeignKey("external_collection.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    external_product_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    source_url: Mapped[str] = mapped_column(String(2_048), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    etag: Mapped[str | None] = mapped_column(String(512))
+    processing_baseline: Mapped[str | None] = mapped_column(String(128))
+    acquisition_granule_id: Mapped[str | None] = mapped_column(String(512))
+    acquisition_pixel_id: Mapped[str | None] = mapped_column(String(255))
+    evidence_family_key: Mapped[str | None] = mapped_column(String(64), index=True)
+    acquisition_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acquisition_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    effective_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    effective_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    forecast_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    forecast_valid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    native_crs: Mapped[str | None] = mapped_column(String(128))
+    footprint_geojson: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
+    resolution_m: Mapped[float | None] = mapped_column(Float)
+    quality_flags: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    license: Mapped[str] = mapped_column(String(1_000), nullable=False)
+    attribution: Mapped[str] = mapped_column(String(1_000), nullable=False)
+    status: Mapped[ExternalArtifactStatus] = mapped_column(
+        enum_column(ExternalArtifactStatus, name="external_artifact_status"), nullable=False
+    )
+    semantic_role: Mapped[ExternalSemanticRole] = mapped_column(
+        enum_column(ExternalSemanticRole, name="external_artifact_semantic_role"), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "collection_id", "external_product_id", "revision", name="uq_external_artifact_revision"
+        ),
+        CheckConstraint("revision >= 1", name="ck_external_artifact_revision"),
+        CheckConstraint(sha256_hex_check("content_hash"), name="ck_external_artifact_hash"),
+        CheckConstraint("length(trim(license)) > 0", name="ck_external_artifact_license"),
+        CheckConstraint("length(trim(attribution)) > 0", name="ck_external_artifact_attribution"),
+        CheckConstraint(
+            "resolution_m IS NULL OR resolution_m > 0", name="ck_external_artifact_resolution"
+        ),
+        CheckConstraint(
+            "acquisition_end_at IS NULL OR "
+            "(acquisition_start_at IS NOT NULL AND acquisition_end_at >= acquisition_start_at)",
+            name="ck_external_artifact_acquisition_time",
+        ),
+        CheckConstraint(
+            "effective_end_at IS NULL OR "
+            "(effective_start_at IS NOT NULL AND effective_end_at >= effective_start_at)",
+            name="ck_external_artifact_effective_time",
+        ),
+        CheckConstraint(
+            "(semantic_role = 'WEATHER_FORECAST' AND forecast_run_at IS NOT NULL AND "
+            "forecast_valid_at IS NOT NULL AND forecast_valid_at >= forecast_run_at) OR "
+            "(semantic_role != 'WEATHER_FORECAST' AND forecast_run_at IS NULL AND "
+            "forecast_valid_at IS NULL)",
+            name="ck_external_artifact_forecast_semantics",
+        ),
+        CheckConstraint(
+            "(footprint_geojson IS NULL AND native_crs IS NULL) OR "
+            "(footprint_geojson IS NOT NULL AND native_crs IS NOT NULL)",
+            name="ck_external_artifact_geometry_crs",
+        ),
+        CheckConstraint(
+            sha256_hex_check("evidence_family_key"),
+            name="ck_external_artifact_family_hash",
+        ),
+    )
+
+
+class ExternalClaim(Base, TimestampMixin):
+    __tablename__ = "external_claim"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    claim_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    artifact_revision_id: Mapped[int] = mapped_column(
+        ForeignKey("external_artifact_revision.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    incident_id: Mapped[int | None] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), index=True
+    )
+    assertion_kind: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    assertion_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    geometry_geojson: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    independent_family_key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "confidence IS NULL OR confidence BETWEEN 0 AND 1",
+            name="ck_external_claim_confidence",
+        ),
+    )
+
+
+class ArtifactLineage(Base, TimestampMixin):
+    __tablename__ = "artifact_lineage"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    parent_revision_id: Mapped[int] = mapped_column(
+        ForeignKey("external_artifact_revision.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    child_revision_id: Mapped[int] = mapped_column(
+        ForeignKey("external_artifact_revision.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    relation: Mapped[ExternalLineageRelation] = mapped_column(
+        enum_column(ExternalLineageRelation, name="external_lineage_relation"), nullable=False
+    )
+    reason: Mapped[str] = mapped_column(String(1_000), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "parent_revision_id", "child_revision_id", "relation", name="uq_artifact_lineage"
+        ),
+        CheckConstraint(
+            "parent_revision_id != child_revision_id", name="ck_artifact_lineage_distinct"
+        ),
+    )
+
+
+class IncidentSourcePlan(Base, TimestampMixin):
+    __tablename__ = "incident_source_plan"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plan_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    incident_id: Mapped[int | None] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), index=True
+    )
+    incident_candidate_id: Mapped[int | None] = mapped_column(
+        ForeignKey("incident_candidate.id", ondelete="RESTRICT"), index=True
+    )
+    collection_id: Mapped[int] = mapped_column(
+        ForeignKey("external_collection.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    cadence_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    watermark: Mapped[str | None] = mapped_column(String(1_000))
+    next_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(1_000))
+    backoff_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(255), index=True)
+    lease_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
+    lease_acquired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    configuration: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        CheckConstraint(
+            "(incident_id IS NOT NULL AND incident_candidate_id IS NULL) OR "
+            "(incident_id IS NULL AND incident_candidate_id IS NOT NULL)",
+            name="ck_incident_source_plan_target",
+        ),
+        CheckConstraint("cadence_seconds > 0", name="ck_incident_source_plan_cadence"),
+        CheckConstraint("backoff_seconds >= 0", name="ck_incident_source_plan_backoff"),
+        CheckConstraint(
+            "(lease_owner IS NULL AND lease_token_hash IS NULL AND lease_acquired_at IS NULL AND "
+            "lease_until IS NULL) OR (lease_owner IS NOT NULL AND lease_token_hash IS NOT NULL AND "
+            "lease_acquired_at IS NOT NULL AND lease_until IS NOT NULL AND "
+            "lease_until > lease_acquired_at)",
+            name="ck_incident_source_plan_lease",
+        ),
+        CheckConstraint(
+            sha256_hex_check("lease_token_hash"),
+            name="ck_incident_source_plan_lease_token_hash",
+        ),
+        Index(
+            "uq_incident_source_plan_incident_collection",
+            "incident_id",
+            "collection_id",
+            unique=True,
+            sqlite_where=text("incident_id IS NOT NULL"),
+            postgresql_where=text("incident_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_incident_source_plan_candidate_collection",
+            "incident_candidate_id",
+            "collection_id",
+            unique=True,
+            sqlite_where=text("incident_candidate_id IS NOT NULL"),
+            postgresql_where=text("incident_candidate_id IS NOT NULL"),
+        ),
     )
 
 

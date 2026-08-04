@@ -1,3 +1,4 @@
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -11,6 +12,8 @@ from fire_viewer.core.research_sources import (
     DEFAULT_RESEARCH_SEARCH_TEMPLATES,
     SOURCE_REGISTRY_VERSION,
 )
+
+DEFAULT_AGENT_MEDIA_SIGNING_SECRET = "development-only-agent-media-signing-secret-change-me"  # noqa: S105
 
 
 class Settings(BaseSettings):
@@ -31,7 +34,7 @@ class Settings(BaseSettings):
     database_pool_recycle_seconds: int = Field(default=300, ge=30, le=3_600)
     database_statement_timeout_ms: int = Field(default=15_000, ge=1_000, le=120_000)
     database_schema_revision: str = Field(
-        default="a6c9d1e4f720",
+        default="b7f2e4a9c810",
         pattern=r"^[0-9a-f]{12}$",
     )
     log_level: str = "INFO"
@@ -70,13 +73,18 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=list)
     trusted_hosts: list[str] = Field(default_factory=lambda: ["localhost", "127.0.0.1"])
 
-    auth_mode: Literal["disabled", "jwt", "local_admin"] = "disabled"
+    auth_mode: Literal["disabled", "jwt", "supabase", "local_admin"] = "disabled"
     oidc_jwks_url: HttpUrl | None = None
     oidc_issuer: str | None = None
     oidc_audience: str | None = None
     oidc_roles_claim: str = "roles"
     oidc_algorithms: list[str] = Field(default_factory=lambda: ["RS256", "ES256"])
     oidc_leeway_seconds: int = Field(default=30, ge=0, le=300)
+    supabase_url: HttpUrl | None = None
+    supabase_publishable_key: SecretStr | None = None
+    supabase_jwt_audience: str = "authenticated"
+    supabase_session_validation_enabled: bool = False
+    event_publication_session_max_age_seconds: int = Field(default=900, ge=60, le=3_600)
     local_admin_username: str = "admin"
     # Format: scrypt$<base64 salt>$<base64 digest>. Generate it with the maintenance command.
     local_admin_password_hash: str | None = None
@@ -107,6 +115,35 @@ class Settings(BaseSettings):
     public_contribution_max_image_bytes: int = Field(
         default=15_728_640, ge=1_048_576, le=16_777_216
     )
+    event_max_image_bytes: int = Field(default=26_214_400, ge=1_048_576, le=104_857_600)
+    event_max_video_bytes: int = Field(default=524_288_000, ge=1_048_576, le=1_073_741_824)
+    event_max_contribution_bytes: int = Field(default=2_147_483_648, ge=1_048_576, le=4_294_967_296)
+    event_max_assets: int = Field(default=20, ge=1, le=20)
+    event_antivirus_mode: Literal["disabled", "clamav", "test_clean"] = "disabled"
+    event_clamav_host: str = "127.0.0.1"
+    event_clamav_port: int = Field(default=3310, ge=1, le=65_535)
+    event_clamav_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    event_worker_evidence_url_ttl_seconds: int = Field(default=1_800, ge=60, le=3_600)
+    event_v2_enabled: bool = False
+    supabase_auth_enabled: bool = False
+    official_connectors_enabled: bool = False
+    official_connector_collections: dict[str, dict[str, object]] = Field(default_factory=dict)
+    meteo_france_access_token: SecretStr | None = Field(
+        default=None,
+        min_length=16,
+        validation_alias=AliasChoices(
+            "FV_METEO_FRANCE_ACCESS_TOKEN",
+            "METEO_FRANCE_ACCESS_TOKEN",
+        ),
+    )
+    official_connector_backoff_initial_seconds: int = Field(default=60, ge=1, le=3_600)
+    official_connector_backoff_max_seconds: int = Field(default=3_600, ge=60, le=86_400)
+    agent_event_pipeline_enabled: bool = False
+    three_d_primary_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("FV_3D_PRIMARY_ENABLED", "FV_THREE_D_PRIMARY_ENABLED"),
+    )
+    v2_publication_enabled: bool = False
     corroboration_min_independent_proofs: int = Field(default=3, ge=3, le=20)
     model_generation_min_area_ha: float = Field(default=500.0, ge=1.0, le=1_000_000.0)
     raw_purge_delay_hours: int = Field(default=24, ge=1, le=24)
@@ -141,9 +178,7 @@ class Settings(BaseSettings):
     )
     agent_source_package_retention_days: int = Field(default=30, ge=1, le=365)
     agent_media_proxy_base_url: HttpUrl = HttpUrl("https://localhost")
-    agent_media_signing_secret: SecretStr = SecretStr(
-        "development-only-agent-media-signing-secret-change-me"
-    )
+    agent_media_signing_secret: SecretStr = SecretStr(DEFAULT_AGENT_MEDIA_SIGNING_SECRET)
     agent_research_enabled: bool = False
     agent_research_source_registry_version: str = Field(
         default=SOURCE_REGISTRY_VERSION, min_length=3, max_length=64
@@ -181,12 +216,79 @@ class Settings(BaseSettings):
             ]
             if missing:
                 raise ValueError(f"Missing JWT settings: {', '.join(missing)}")
+        if self.auth_mode == "supabase":
+            if not self.supabase_auth_enabled:
+                raise ValueError("supabase_auth_enabled is required for Supabase authentication")
+            if not self.supabase_url:
+                raise ValueError("supabase_url is required for Supabase authentication")
+            if self.supabase_session_validation_enabled and not self.supabase_publishable_key:
+                raise ValueError(
+                    "supabase_publishable_key is required for active session validation"
+                )
+            if self.oidc_jwks_url or self.oidc_issuer or self.oidc_audience:
+                raise ValueError("Generic OIDC settings cannot override the Supabase JWT contract")
+            if self.v2_publication_enabled and not self.supabase_session_validation_enabled:
+                raise ValueError(
+                    "Supabase session validation is required when v2 publication is enabled"
+                )
+            if self.event_v2_enabled and not self.supabase_session_validation_enabled:
+                raise ValueError(
+                    "Supabase session validation is required for verified v2 contributors"
+                )
         if self.auth_mode == "local_admin" and not self.local_admin_password_hash:
             raise ValueError(
                 "local_admin_password_hash is required when local_admin authentication is enabled"
             )
+        if self.event_antivirus_mode == "test_clean" and self.environment != "test":
+            raise ValueError("event_antivirus_mode=test_clean is restricted to tests")
+        if (
+            self.environment in {"staging", "production"}
+            and self.event_v2_enabled
+            and self.event_antivirus_mode != "clamav"
+        ):
+            raise ValueError("ClamAV is required for event evidence outside development/test")
+        if (
+            self.environment in {"staging", "production"}
+            and self.event_v2_enabled
+            and self.auth_mode != "supabase"
+        ):
+            raise ValueError("Supabase authentication is required for event v2 outside tests")
         if self.matching_create_below >= self.matching_auto_attach_above:
             raise ValueError("matching_create_below must be lower than auto-attach threshold")
+        if (
+            self.official_connector_backoff_initial_seconds
+            > self.official_connector_backoff_max_seconds
+        ):
+            raise ValueError("Official connector initial backoff must not exceed its maximum")
+        connector_route_pattern = (
+            r"^[a-z0-9][a-z0-9_-]{1,94}[a-z0-9]/"
+            r"[a-z0-9][a-z0-9_.-]{1,126}[a-z0-9]$"
+        )
+        connector_kinds = {
+            "cdse_stac",
+            "ign_geoplateforme_wfs",
+            "meteo_france_synop",
+        }
+        meteo_connector_enabled = False
+        for route, connector_configuration in self.official_connector_collections.items():
+            if not re.fullmatch(connector_route_pattern, route):
+                raise ValueError(
+                    "Official connector routes must use exact provider/collection keys"
+                )
+            if set(connector_configuration) - {"enabled", "kind"}:
+                raise ValueError(
+                    "Official connector route configuration accepts only enabled and kind"
+                )
+            kind = connector_configuration.get("kind")
+            enabled = connector_configuration.get("enabled", False)
+            if kind not in connector_kinds or not isinstance(enabled, bool):
+                raise ValueError("Official connector route configuration is invalid")
+            if enabled and kind == "meteo_france_synop":
+                meteo_connector_enabled = True
+        if meteo_connector_enabled and self.meteo_france_access_token is None:
+            raise ValueError(
+                "meteo_france_access_token is required when a Météo-France connector is enabled"
+            )
         if self.zone_upload_max_unpacked_bytes < self.zone_upload_max_bytes:
             raise ValueError("zone_upload_max_unpacked_bytes must cover the archive size limit")
         if self.environment == "production" and "*" in self.trusted_hosts:
@@ -235,8 +337,13 @@ class Settings(BaseSettings):
         if self.environment in {"staging", "production"}:
             if self.agent_media_proxy_base_url.scheme != "https":
                 raise ValueError("agent_media_proxy_base_url must use HTTPS")
-            if len(self.agent_media_signing_secret.get_secret_value()) < 32:
+            media_signing_secret = self.agent_media_signing_secret.get_secret_value()
+            if len(media_signing_secret) < 32:
                 raise ValueError("agent_media_signing_secret must contain at least 32 characters")
+            if self.event_v2_enabled and media_signing_secret == DEFAULT_AGENT_MEDIA_SIGNING_SECRET:
+                raise ValueError(
+                    "agent_media_signing_secret must be replaced when event v2 is enabled"
+                )
         if self.agent_research_enabled and not normalized_research_domains:
             raise ValueError("At least one research domain is required when research is enabled")
         if self.agent_research_enabled and not normalized_search_providers:

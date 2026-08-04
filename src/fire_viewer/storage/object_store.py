@@ -61,6 +61,10 @@ class ObjectStore(Protocol):
 
     def read_bytes(self, uri: str) -> bytes: ...
 
+    def materialize(self, uri: str, destination: Path) -> ObjectMetadata: ...
+
+    def put_file(self, source_file: Path, uri: str) -> None: ...
+
     def head(self, uri: str) -> ObjectMetadata: ...
 
     def list_prefix(self, key: str, *, limit: int) -> list[ObjectMetadata]: ...
@@ -104,6 +108,28 @@ class LocalObjectStore:
         if not path.is_file():
             raise ObjectStorageError("Object not found.")
         return path.read_bytes()
+
+    def materialize(self, uri: str, destination: Path) -> ObjectMetadata:
+        metadata = self.head(uri)
+        source = self._path_for(metadata.pathname)
+        if destination.exists():
+            raise ObjectStorageError("The materialized destination already exists.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copyfile(source, destination)
+        except OSError as exc:
+            destination.unlink(missing_ok=True)
+            raise ObjectStorageError("The object could not be materialized.") from exc
+        return metadata
+
+    def put_file(self, source_file: Path, uri: str) -> None:
+        if not uri.startswith("local://"):
+            raise ObjectStorageError("Unsupported local object URI.")
+        destination = self._path_for(uri.removeprefix("local://"))
+        if destination.exists():
+            raise ObjectStorageError("The immutable object key already exists.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source_file, destination)
 
     def head(self, uri: str) -> ObjectMetadata:
         if not uri.startswith("local://"):
@@ -202,6 +228,28 @@ class VercelBlobObjectStore:
         if result.status_code != 200:
             raise ObjectStorageError("Object not found.")
         return result.content
+
+    def materialize(self, uri: str, destination: Path) -> ObjectMetadata:
+        metadata = self.head(uri)
+        if destination.exists():
+            raise ObjectStorageError("The materialized destination already exists.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.client.download_file(
+                metadata.pathname,
+                destination,
+                access="private",
+                overwrite=False,
+                create_parents=True,
+            )
+        except BaseException as exc:
+            destination.unlink(missing_ok=True)
+            raise ObjectStorageError("The object could not be materialized.") from exc
+        return metadata
+
+    def put_file(self, source_file: Path, uri: str) -> None:
+        del source_file, uri
+        raise ObjectStorageError("Direct file writes are unavailable for Vercel Blob.")
 
     def head(self, uri: str) -> ObjectMetadata:
         if not uri.startswith("vercel-blob://"):

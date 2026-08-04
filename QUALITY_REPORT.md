@@ -1,5 +1,9 @@
 # Rapport qualité — Fire-Viewer backend 0.1.0
 
+> **Rapport historique.** Les résultats ci-dessous décrivent uniquement les révisions et dates
+> indiquées. Ils ne prouvent ni la révision courante, ni le flux événementiel v2, ni un déploiement
+> live. La matrice de statut du dépôt documentaire FireViewer fait autorité pour l'état courant.
+
 Date d'exécution : 12 juillet 2026.
 
 ## Environnement

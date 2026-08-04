@@ -147,6 +147,7 @@ def create_source_blob_upload_grant(
     settings: Settings,
     upload_id: str | None = None,
     purpose: str = "source_package",
+    allowed_files: tuple[dict[str, object], ...] | None = None,
 ) -> BlobUploadGrant:
     token = _read_write_token(settings)
     if file_count > settings.agent_source_package_max_files:
@@ -155,10 +156,39 @@ def create_source_blob_upload_grant(
         raise BadRequestError("source_package_too_large", "The source package is too large.")
     upload_id = upload_id or uuid4().hex
     pathname_prefix = build_object_store(settings).pathname_for(f"source-packages/{upload_id}")
+    if purpose == "event_evidence":
+        if allowed_files is None or len(allowed_files) != file_count:
+            raise BadRequestError(
+                "invalid_event_evidence_grant", "Every event asset requires an exact grant."
+            )
+        granted_total = 0
+        for item in allowed_files:
+            pathname = item.get("pathname")
+            media_type = item.get("media_type")
+            size_bytes = item.get("size_bytes")
+            if (
+                not isinstance(pathname, str)
+                or not pathname.startswith(f"{pathname_prefix}/")
+                or not isinstance(media_type, str)
+                or not media_type.startswith(("image/", "video/"))
+                or not isinstance(size_bytes, int)
+                or size_bytes <= 0
+            ):
+                raise BadRequestError(
+                    "invalid_event_evidence_grant", "An event asset grant is invalid."
+                )
+            granted_total += size_bytes
+        if granted_total != total_size_bytes:
+            raise BadRequestError(
+                "invalid_event_evidence_grant", "The event asset grant total is invalid."
+            )
+    elif allowed_files is not None:
+        raise BadRequestError(
+            "invalid_source_upload_grant", "Exact asset grants are reserved for event evidence."
+        )
     now = utcnow()
     expires_at = now + timedelta(minutes=settings.blob_upload_grant_minutes)
-    grant = jwt.encode(
-        {
+    claims: dict[str, object] = {
             "iss": BLOB_UPLOAD_GRANT_ISSUER,
             "aud": BLOB_UPLOAD_GRANT_AUDIENCE,
             "sub": actor.actor_id,
@@ -170,7 +200,11 @@ def create_source_blob_upload_grant(
             "file_count": file_count,
             "total_size_bytes": total_size_bytes,
             "purpose": purpose,
-        },
+        }
+    if allowed_files is not None:
+        claims["allowed_files"] = list(allowed_files)
+    grant = jwt.encode(
+        claims,
         token,
         algorithm="HS256",
     )
@@ -275,6 +309,33 @@ def issue_blob_client_token(
         allowed_suffixes = _ALLOWED_SOURCE_SUFFIXES
         allowed_content_types = ALLOWED_SOURCE_CONTENT_TYPES
         maximum_size = settings.agent_source_package_max_file_bytes
+    elif purpose == "event_evidence":
+        allowed_suffixes = _ALLOWED_SOURCE_SUFFIXES
+        raw_files = claims.get("allowed_files")
+        if not isinstance(raw_files, list):
+            raise ForbiddenError("The event evidence grant is incomplete.")
+        granted_file = next(
+            (
+                item
+                for item in raw_files
+                if isinstance(item, dict) and item.get("pathname") == pathname
+            ),
+            None,
+        )
+        if granted_file is None:
+            raise ForbiddenError("The Blob pathname is not a declared event asset.")
+        declared_type = granted_file.get("media_type")
+        declared_size = granted_file.get("size_bytes")
+        if (
+            not isinstance(declared_type, str)
+            or declared_type not in ALLOWED_SOURCE_CONTENT_TYPES
+            or not declared_type.startswith(("image/", "video/"))
+            or not isinstance(declared_size, int)
+            or declared_size <= 0
+        ):
+            raise ForbiddenError("The declared event asset grant is invalid.")
+        allowed_content_types = (declared_type,)
+        maximum_size = declared_size
     elif purpose == "admin_daily_satellite":
         allowed_suffixes = _ALLOWED_DAILY_SATELLITE_SUFFIXES
         allowed_content_types = ALLOWED_DAILY_SATELLITE_CONTENT_TYPES

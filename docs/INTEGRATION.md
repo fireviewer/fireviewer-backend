@@ -1,4 +1,9 @@
-# Guide de raccordement
+# Guide de raccordement historique v1
+
+> Ce guide couvre uniquement les routes incident-centriques v1 maintenues pour compatibilité. Les
+> contributions, preuves privées, revues et timelines du flux événementiel v2 suivent le contrat
+> `EVENT_API_V2` maintenu dans le dépôt documentaire FireViewer. Aucune double écriture ni conversion
+> automatique v1 vers v2 ne doit être déduite de ce document.
 
 ## Contrat HTTP
 

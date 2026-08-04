@@ -1,4 +1,8 @@
-# Architecture du premier incrément
+# Architecture historique du premier incrément v1
+
+> Ce document décrit le socle incident-centrique G1/v1 maintenu pour compatibilité. L'architecture
+> événementielle v2, ses objets, ses flags, ses gates et ses statuts sont définis dans le dépôt
+> documentaire FireViewer. Le présent document ne constitue pas la source de vérité du flux v2.
 
 ## Périmètre
 
@@ -52,12 +56,16 @@ Une source non vérifiée peut être découverte automatiquement. Une source `pa
 
 Le token ne doit jamais être placé dans le frontend, Unity, un manifeste, un log ou un événement d'audit.
 
-## Extension par workers
+## Extension historique par workers
 
-Le dispatcher futur lira `outbox_event` et publiera, au minimum :
+Le contrat initial prévoyait qu'un dispatcher lise `outbox_event` et publie, au minimum :
 
 - `observation.processed`;
 - `observation.review_resolved`;
 - `incident.status_changed`.
 
-Le worker terrain utilisera `job` pour les leases, reprises et quarantaines. Le dispatcher devra marquer `published_at` après confirmation du broker et rendre les handlers idempotents au moyen de `event_id`, `trace_id` et des versions d'entrée. La mutation métier reste dans l'API transactionnelle.
+Le runtime courant possède désormais des dispatchers et tables dédiées qui ne sont pas décrits par
+ce schéma historique. Dans le flux v1, `job` reste réservé à son rôle historique. Dans le flux
+événementiel v2, les candidats, jobs persistants, leases, résultats, abstentions et revues suivent
+leurs contrats propres. Dans tous les cas, la mutation métier reste dans l'API transactionnelle et
+aucune sortie worker ne publie directement un contenu.

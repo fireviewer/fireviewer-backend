@@ -35,12 +35,23 @@ class BodySizeLimitMiddleware:
         self,
         app: ASGIApp,
         max_body_bytes: int,
+        streaming_put_path_prefixes: tuple[str, ...] = (),
     ) -> None:
         self.app = app
         self.max_body_bytes = max_body_bytes
+        self.streaming_put_path_prefixes = streaming_put_path_prefixes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("method") not in {"POST", "PUT", "PATCH"}:
+            await self.app(scope, receive, send)
+            return
+
+        path = str(scope.get("path", ""))
+        if scope.get("method") == "PUT" and any(
+            path.startswith(prefix) for prefix in self.streaming_put_path_prefixes
+        ):
+            # These endpoints enforce their declared per-object size while consuming
+            # the request stream and must not be buffered into process memory here.
             await self.app(scope, receive, send)
             return
 
@@ -149,7 +160,12 @@ class AdminNoStoreMiddleware(BaseHTTPMiddleware):
 
     def __init__(self, app: ASGIApp, *, api_prefix: str) -> None:
         super().__init__(app)
-        self.admin_prefixes = (f"{api_prefix.rstrip('/')}/admin", "/api/v2/admin")
+        self.admin_prefixes = (
+            f"{api_prefix.rstrip('/')}/admin",
+            "/api/v2/admin",
+            "/api/v2/internal",
+            "/api/v2/me",
+        )
 
     async def dispatch(
         self,

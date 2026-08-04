@@ -8,6 +8,8 @@ import time
 from fire_viewer.core.config import get_settings
 from fire_viewer.db.engine import create_db_engine, create_session_factory
 from fire_viewer.services.agent_dispatcher import build_runpod_client, run_dispatcher_once
+from fire_viewer.services.event_dispatcher import run_event_dispatcher_once
+from fire_viewer.services.event_retention import purge_due_event_evidence
 from fire_viewer.services.public_contribution_schedule import run_public_contribution_schedule_once
 
 
@@ -29,10 +31,16 @@ def main() -> None:
         with build_runpod_client(settings) as client:
             while True:
                 with factory() as schedule_session:
+                    purge_due_event_evidence(schedule_session, settings=settings)
                     run_public_contribution_schedule_once(
                         schedule_session, worker_id=worker_id, settings=settings
                     )
-                processed = run_dispatcher_once(
+                processed = run_event_dispatcher_once(
+                    factory,
+                    worker_id=worker_id,
+                    settings=settings,
+                    client=client,
+                ) or run_dispatcher_once(
                     factory,
                     worker_id=worker_id,
                     settings=settings,

@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "env": {
-    "FV_DATABASE_SCHEMA_REVISION": "a6c9d1e4f720"
+    "FV_DATABASE_SCHEMA_REVISION": "b7f2e4a9c810"
   },
   "functions": {
     "api/index.py": {
@@ -20,6 +20,10 @@
     {
       "path": "/api/v1/internal/agent-orchestrator/media",
       "schedule": "0 9,10,21,22 * * *"
+    },
+    {
+      "path": "/api/v1/internal/external-sources/progress",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

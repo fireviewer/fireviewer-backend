@@ -1,8 +1,8 @@
 # Raccordement Vercel, Neon et Vercel Private Blob
 
 Ce guide raccorde le backend **G1**. Il ne certifie pas un usage opérationnel critique et ne
-remplace pas la fermeture des blocages G2 listés dans
-[`../../../docs/ADMIN_BACKEND_READINESS.md`](../../../docs/ADMIN_BACKEND_READINESS.md).
+remplace pas la matrice de statut maintenue dans le dépôt documentaire FireViewer. Le flux
+événementiel v2 reste désactivé par défaut et sa recette déployée constitue une gate séparée.
 
 ## 1. Vérifier localement avec PostGIS
 
@@ -27,7 +27,7 @@ Le JSON attendu contient :
 {
   "status": "ready",
   "database": "ok",
-  "schema_revision": "a6c9d1e4f720",
+  "schema_revision": "b7f2e4a9c810",
   "spatial_index": "ok"
 }
 ```
@@ -97,7 +97,7 @@ Définir séparément les valeurs **Preview** et **Production** :
 ```text
 FV_ENVIRONMENT=production
 FV_DATABASE_URL=<connexion Neon poolée>
-FV_DATABASE_SCHEMA_REVISION=a6c9d1e4f720
+FV_DATABASE_SCHEMA_REVISION=b7f2e4a9c810
 FV_DATABASE_POOL_SIZE=2
 FV_DATABASE_MAX_OVERFLOW=3
 FV_OBJECT_STORAGE_BACKEND=vercel_blob
@@ -114,6 +114,30 @@ FV_AGENT_EXPECTED_MODEL_REVISIONS={"fire_detection":"<sha-checkpoint>","multimod
 ```
 
 Le mode `local_admin` reste limité à G1. G2 exige OIDC, identités nominatives et MFA.
+
+La valeur de `FV_DATABASE_SCHEMA_REVISION` doit toujours correspondre à l'unique head Alembic
+empaqueté et à la valeur suivie dans `.env.example`. Une divergence bloque volontairement la
+migration ou `/readyz`; ne recopiez pas une ancienne révision depuis un rapport historique.
+
+### Variables du flux événementiel v2
+
+Les variables suivantes restent à `false` tant que l'environnement privé, les dépendances et la
+recette correspondante ne sont pas prêts :
+
+```text
+FV_EVENT_V2_ENABLED=false
+FV_SUPABASE_AUTH_ENABLED=false
+FV_AGENT_EVENT_PIPELINE_ENABLED=false
+FV_OFFICIAL_CONNECTORS_ENABLED=false
+FV_3D_PRIMARY_ENABLED=false
+FV_V2_PUBLICATION_ENABLED=false
+FV_EVENT_ANTIVIRUS_MODE=disabled
+```
+
+En staging et en production, l'activation de `FV_EVENT_V2_ENABLED` exige une authentification
+Supabase effectivement raccordée, la validation des sessions et `FV_EVENT_ANTIVIRUS_MODE=clamav`.
+La présence des routes ou le passage des tests locaux ne prouve ni Supabase, ni Blob, ni ClamAV,
+ni RunPod, ni les connecteurs externes en environnement live.
 
 ## 6. Déployer le backend
 

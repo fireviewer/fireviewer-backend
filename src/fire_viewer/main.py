@@ -15,6 +15,7 @@ from fire_viewer.api.admin_v2 import router as admin_v2_router
 from fire_viewer.api.agent_batches import router as agent_batches_router
 from fire_viewer.api.agent_dispatch_cron import router as agent_dispatch_cron_router
 from fire_viewer.api.errors import install_exception_handlers
+from fire_viewer.api.event_v2 import router as event_v2_router
 from fire_viewer.api.health import router as health_router
 from fire_viewer.api.middleware import (
     AdminNoStoreMiddleware,
@@ -96,6 +97,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "X-Trace-Id",
                 "X-CSRF-Token",
                 "X-Blob-Upload-Grant",
+                "X-Evidence-Upload-Grant",
+                "X-Evidence-Upload-Id",
             ],
             expose_headers=["ETag", "Idempotent-Replay", "X-Trace-Id"],
             max_age=600,
@@ -103,6 +106,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(
         BodySizeLimitMiddleware,
         max_body_bytes=settings.max_body_bytes,
+        streaming_put_path_prefixes=("/api/v2/evidence/uploads/",),
     )
     app.add_middleware(TraceMiddleware)
     app.add_middleware(AdminNoStoreMiddleware, api_prefix=settings.api_prefix)
@@ -118,6 +122,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agent_batches_router)
     app.include_router(agent_dispatch_cron_router, prefix=settings.api_prefix)
     app.include_router(private_agent_media_router)
+    app.include_router(event_v2_router)
     app.mount("/metrics", make_asgi_app())
 
     default_openapi = app.openapi

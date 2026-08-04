@@ -44,5 +44,6 @@ les hashes, un trigger critique ou la migration sont invalides. Les tests couvre
 tronqué, un hash altéré, un trigger audit affaibli, un garde-fou relationnel ou spatial
 absent, une cible existante et le nettoyage du fichier `.part`.
 
-La passe FV-007 a exécuté 87 tests backend avec 88,06 % de couverture. Docker réellement
+La passe historique FV-007 a exécuté 87 tests backend avec 88,06 % de couverture sur la révision
+alors documentée. Ce résultat ne prouve pas la révision courante. Docker réellement
 exécuté et PostgreSQL/PostGIS ne font pas partie de cette preuve locale.

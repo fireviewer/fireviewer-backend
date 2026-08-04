@@ -1,11 +1,55 @@
-# Fire-Viewer - backend incident-centrique
+# FireViewer — backend événementiel et incident-centrique
 
-Le dépôt livre le socle G1 exécutable du registre incident-centrique, les projections publiques et
-administratives, le registre de packages spatiaux et les adaptateurs PostgreSQL/PostGIS et Vercel
-Private Blob. L'état exact par rapport au cahier des charges complet est suivi dans
-[`../../docs/ADMIN_BACKEND_READINESS.md`](../../docs/ADMIN_BACKEND_READINESS.md).
+Ce dépôt porte le registre durable des incidents, des contributions événementielles, des preuves,
+des tentatives de localisation, des événements d'activité, des sources externes et des décisions
+de revue ou de publication. La refonte v2 est **additive** : les contrats `/api/v1` restent
+disponibles pendant la migration et ne sont pas convertis artificiellement en événements complets.
+
+La doctrine produit et les contrats transverses sont maintenus dans le dépôt canonique
+[`fireviewer/Fireviewer_doc`](https://github.com/fireviewer/Fireviewer_doc). Les documents présents
+dans [`docs/`](docs/) détaillent les responsabilités propres à ce backend.
 
 > Ce logiciel est un socle de développement et de démonstration. Il n'est pas certifié pour la conduite des secours, l'évacuation, la prévision de propagation ni la confirmation automatique d'un feu.
+
+## Position dans l'architecture événementielle v2
+
+Le flux cible est :
+
+```text
+viewpoint privé + temps + message et/ou médias
+→ EventCandidate privé et idempotent
+→ analyse asynchrone, localisation ou abstention
+→ revue analyste
+→ publication éditeur
+→ timeline et progression publiques versionnées
+```
+
+Le backend applique les invariants suivants :
+
+- le point de prise de vue n'est jamais assimilé au point actif et n'apparaît dans aucune réponse
+  publique ;
+- une sortie IA ne publie rien et ne peut pas inventer une coordonnée, un périmètre ou une
+  chronologie ;
+- une vue imprécise produit une zone d'incertitude, un secteur ou une abstention ;
+- un analyste valide ou corrige, puis un éditeur publie par une transition séparée ;
+- un hotspot isolé ne crée jamais un incident public ; une déclaration officielle peut seulement
+  créer un candidat privé ;
+- les observations, surfaces brûlées, prévisions et simulations conservent des rôles sémantiques
+  distincts.
+
+L'implémentation v2 est protégée par les flags `FV_EVENT_V2_ENABLED`,
+`FV_SUPABASE_AUTH_ENABLED`, `FV_OFFICIAL_CONNECTORS_ENABLED`,
+`FV_AGENT_EVENT_PIPELINE_ENABLED`, `FV_3D_PRIMARY_ENABLED` et
+`FV_V2_PUBLICATION_ENABLED`. Leur présence et les tests locaux ne constituent pas une recette des
+services Supabase, Blob, PostGIS, RunPod ou fournisseurs externes en production.
+
+Contrats spécialisés :
+
+- [orchestration agentique](docs/AGENT_ORCHESTRATION.md) ;
+- [registre de preuves](docs/EVIDENCE_REGISTRY.md) ;
+- [revue humaine](docs/HUMAN_REVIEW_CONTRACT.md) ;
+- [gates de publication](docs/PUBLICATION_GATES.md) ;
+- [préparation au déploiement](docs/DEPLOYMENT_READINESS.md).
 
 ## Ce qui est implémenté
 
@@ -134,6 +178,21 @@ Le connecteur envoie ensuite le même secret dans `X-Source-Token`. Le secret n'
 
 ## Endpoints principaux
 
+### API v2 additive
+
+| Méthode | Route canonique | Rôle |
+|---|---|---|
+| `POST` | `/api/v2/evidence/uploads` | Ouvrir un upload privé authentifié |
+| `POST` | `/api/v2/evidence/uploads/{upload_id}/finalize` | Finaliser et contrôler les preuves |
+| `POST` | `/api/v2/event-candidates` | Créer une contribution événementielle idempotente |
+| `GET` | `/api/v2/me/event-candidates` | Suivre ses contributions sans exposer celles d'autrui |
+| `GET` | `/api/v2/internal/event-candidates/{candidate_id}` | Charger le dossier privé de revue |
+| `POST` | `/api/v2/internal/fire-activity-events/{event_id}/validate` | Validation analyste auditée |
+| `POST` | `/api/v2/internal/fire-activity-events/{event_id}/publish` | Publication éditeur avec session récente |
+| `GET` | `/api/v2/incidents/{incident_id}/timeline` | Projection des seuls événements publiés |
+
+### API v1 conservée pendant la migration
+
 | Méthode | Route canonique | Rôle |
 |---|---|---|
 | `POST` | `/api/v1/incident/detect` | Ingestion idempotente et matching |
@@ -179,12 +238,12 @@ make quality
 ```
 
 Le rapport historique [`QUALITY_REPORT.md`](QUALITY_REPORT.md) décrit la baseline G1 au moment de
-sa rédaction ; il ne doit pas être interprété comme la preuve de la révision courante. L'état de
-validation le plus récent, les commandes réellement exécutées et les limites restantes sont suivis
-dans [`../../docs/ADMIN_BACKEND_READINESS.md`](../../docs/ADMIN_BACKEND_READINESS.md).
+sa rédaction ; il ne doit pas être interprété comme la preuve de la révision courante. Les gates de
+préparation sont suivis dans [`docs/DEPLOYMENT_READINESS.md`](docs/DEPLOYMENT_READINESS.md) ; seul
+un rapport daté peut attester les commandes réellement exécutées pour une révision donnée.
 
-Le contrat public viewer v2 est documenté dans
-[`../../docs/adr/ADR-001-viewer-manifest-public-contract.md`](../../docs/adr/ADR-001-viewer-manifest-public-contract.md).
+Le contrat historique du manifeste viewer est documenté dans
+[`docs/INTEGRATION.md`](docs/INTEGRATION.md#manifeste-viewer).
 Son schéma versionné est généré depuis `ViewerManifest` avec :
 
 ```bash
@@ -265,7 +324,9 @@ fichier ni téléchargement. Un asset GLB de démonstration vérifiable est repo
 - La préparation LiDAR reste volontairement locale ; le backend reçoit des packages déjà produits.
 - Le téléversement direct/multipart des gros packages est implémenté ; la recette réelle du package
   de 417 Mo sur le store Blob de production reste à exécuter.
-- La collecte publique, l'antivirus, l'extraction de frames et l'interface de revue des médias restent à raccorder ; les lots privés, preuves de consentement, retraits et dates de purge sont persistés.
+- L'admission v2, les uploads privés, les consentements, la revue et les transitions sont présents ;
+  la recette live de l'antivirus, du Blob, de Supabase Auth et des limites d'infrastructure reste à
+  exécuter avant activation publique.
 - Le dispatcher RunPod est intégré au projet Vercel API sous forme de Crons bornés : preuves utilisateur toutes les 3 h, recherche médiatique à 11 h/23 h Europe/Paris, satellite/points chauds/thermique avec le run de 11 h, et suivi du job actif. Une file globale traite strictement un incendie après l'autre. Son exécution contre l'endpoint de production reste à recetter après configuration des secrets serveur.
 - Les tables historiques `job` et `outbox_event` restent réservées au terrain, aux assets et à l'outbox. Leur runner n'est pas fourni par le dispatcher agentique.
 - Le schéma PostgreSQL/PostGIS est migré par Alembic ; l'import automatisé depuis une base SQLite

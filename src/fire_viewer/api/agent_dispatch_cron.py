@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from hmac import compare_digest
 
+import httpx
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from fire_viewer.api.dependencies import SettingsDep, TraceIdDep
 from fire_viewer.domain.errors import DomainError
 from fire_viewer.services.agent_orchestration import run_public_source_schedule_once
+from fire_viewer.services.external_source_scheduler import run_external_source_scheduler_once
 from fire_viewer.services.hosted_agent_dispatcher import process_one_hosted_dispatch
+from fire_viewer.services.official_connectors import build_official_connector_registry
 from fire_viewer.services.public_contribution_schedule import (
     run_public_contribution_schedule_once,
 )
@@ -47,6 +50,16 @@ def _ensure_enabled(settings: SettingsDep) -> None:
             code="agent_dispatch_disabled",
             title="Agent dispatcher unavailable",
             detail="Private agent dispatch is disabled.",
+        )
+
+
+def _ensure_official_connectors_enabled(settings: SettingsDep) -> None:
+    if not settings.official_connectors_enabled:
+        raise DomainError(
+            status_code=503,
+            code="official_connectors_disabled",
+            title="Official source scheduler unavailable",
+            detail="Official source connectors are disabled.",
         )
 
 
@@ -123,3 +136,27 @@ def schedule_public_source_research(
         settings=settings,
     )
     return AgentDispatchTickResponse(processed=processed, scheduled=scheduled)
+
+
+@router.get(
+    "/internal/external-sources/progress",
+    response_model=AgentDispatchTickResponse,
+    include_in_schema=False,
+)
+def progress_external_source_scheduler(
+    request: Request,
+    settings: SettingsDep,
+    trace_id: TraceIdDep,
+) -> AgentDispatchTickResponse:
+    _authorize_cron(request, settings)
+    _ensure_official_connectors_enabled(settings)
+    worker_id = f"vercel-official-sources:{trace_id}"
+    with httpx.Client(trust_env=False) as client:
+        connectors = build_official_connector_registry(settings, client=client)
+        processed = run_external_source_scheduler_once(
+            request.app.state.session_factory,
+            settings=settings,
+            worker_id=worker_id,
+            connectors=connectors,
+        )
+    return AgentDispatchTickResponse(processed=processed)
