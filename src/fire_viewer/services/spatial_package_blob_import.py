@@ -39,6 +39,9 @@ from fire_viewer.storage.object_store import ObjectStorageError
 _PACKAGE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,95}$")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _REQUIRED_PATHS = frozenset({"package-manifest.json", "catalog.json"})
+_OMNIVERSE_COMMON_PATHS = frozenset({"manifest.json", "dependency-inventory.json"})
+_OMNIVERSE_MAP_CONTRACT = "contracts/map-contract.json"
+_OMNIVERSE_PERIMETER_CONTRACT = "contracts/perimeter-contract.json"
 _ASSET_PREFIXES = ("assets/", "terrain/", "vectors/")
 _CONTENT_TYPES = {
     ".json": "application/json",
@@ -50,6 +53,13 @@ _CONTENT_TYPES = {
     ".glb": "model/gltf-binary",
     ".fwtile": "application/vnd.fireviewer.tile",
     ".fwterrain": "application/vnd.fireviewer.terrain",
+    ".usd": "model/vnd.usd",
+    ".usda": "model/vnd.usd",
+    ".usdc": "model/vnd.usd",
+    ".usdz": "model/vnd.usdz+zip",
+    ".hdr": "image/vnd.radiance",
+    ".npz": "application/octet-stream",
+    ".jgw": "text/plain",
 }
 
 
@@ -83,6 +93,14 @@ class ValidatedBlobPackage:
     object_count: int
     total_size_bytes: int
     spatial_profile: ValidatedSpatialProfile | None
+    package_role: str = "legacy_map"
+    manifest_path: str = "package-manifest.json"
+    contract_path: str | None = None
+    contract_sha256: str | None = None
+    acceptance_sha256: str | None = None
+    package_revision: int | None = None
+    state_count: int | None = None
+    base_map: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,6 +369,514 @@ def _list_objects(
         ) from exc
 
 
+def _read_small_json(
+    store: ObjectStore,
+    *,
+    storage_key: str,
+    path: str,
+    declared: AdminBlobObjectReference,
+    settings: Settings,
+) -> tuple[bytes, dict[str, Any]]:
+    if declared.size_bytes > settings.zone_upload_max_manifest_bytes:
+        raise BadRequestError(
+            "package_metadata_too_large", f"{path} exceeds the configured metadata limit."
+        )
+    raw = store.read_bytes(store.uri_for(f"{storage_key}/{path}"))
+    if len(raw) != declared.size_bytes:
+        raise BadRequestError("blob_metadata_mismatch", f"{path} size changed.")
+    return raw, _json_document(raw, label=path)
+
+
+def _omniverse_inventory(document: dict[str, Any]) -> list[dict[str, Any]]:
+    files = document.get("files")
+    declared_count = document.get("file_count")
+    if not isinstance(files, list) or not files or declared_count != len(files):
+        raise BadRequestError(
+            "invalid_dependency_inventory",
+            "dependency-inventory.json must declare its complete file list.",
+        )
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            raise BadRequestError("invalid_dependency_inventory", "An inventory entry is invalid.")
+        path_value = item.get("path")
+        path = _safe_path(path_value) if isinstance(path_value, str) else ""
+        if not path or path in seen:
+            raise BadRequestError(
+                "invalid_dependency_inventory", "The inventory contains a duplicate path."
+            )
+        seen.add(path)
+        _content_type(path)
+        result.append(
+            {
+                "path": path,
+                "sha256": _sha256(item.get("sha256"), label=f"inventory entry {path}"),
+                "size_bytes": _positive_int(
+                    item.get("byte_count"), label=f"inventory entry size {path}"
+                ),
+            }
+        )
+    return result
+
+
+def _omniverse_spatial_profile(
+    *,
+    contract: dict[str, Any],
+    source_catalog: dict[str, Any],
+) -> ValidatedSpatialProfile:
+    spatial = contract.get("spatial_reference")
+    source_spatial = source_catalog.get("spatial_contract")
+    if not isinstance(spatial, dict) or not isinstance(source_spatial, dict):
+        raise BadRequestError(
+            "invalid_package_spatial_profile", "The OpenUSD spatial reference is missing."
+        )
+    if (
+        spatial.get("horizontal_crs") != "EPSG:2154"
+        or spatial.get("vertical_datum") != "NGF-IGN69"
+        or spatial.get("up_axis") != "Z"
+        or _finite_number(spatial.get("meters_per_unit"), label="meters_per_unit") != 1.0
+        or source_spatial.get("grid_crs") != "EPSG:2154"
+        or source_spatial.get("vertical_datum") != "NGF-IGN69"
+    ):
+        raise BadRequestError(
+            "invalid_package_spatial_profile",
+            "The OpenUSD map must use Lambert-93, NGF-IGN69 and metre units.",
+        )
+    bounds = _finite_tuple(spatial.get("bounds_l93_m"), size=4, label="bounds_l93_m")
+    origin = _finite_tuple(
+        spatial.get("local_origin_l93_m"), size=3, label="local_origin_l93_m"
+    )
+    if not (bounds[0] < bounds[2] and bounds[1] < bounds[3]):
+        raise BadRequestError("invalid_package_spatial_profile", "The map bounds are invalid.")
+    if not (bounds[0] <= origin[0] <= bounds[2] and bounds[1] <= origin[1] <= bounds[3]):
+        raise BadRequestError(
+            "invalid_package_spatial_profile", "The map origin is outside its bounds."
+        )
+    source_height = _finite_number(
+        source_spatial.get("height_origin_ngf_ign69_m"), label="height origin"
+    )
+    maximum_height = _finite_number(
+        source_spatial.get("height_maximum_ngf_ign69_m"), label="height maximum"
+    )
+    if maximum_height <= source_height:
+        raise BadRequestError(
+            "invalid_package_spatial_profile", "The map elevation range is invalid."
+        )
+    return ValidatedSpatialProfile(
+        origin_easting_l93=origin[0],
+        origin_northing_l93=origin[1],
+        source_orthometric_height_m=source_height,
+        min_easting_l93=bounds[0],
+        min_northing_l93=bounds[1],
+        max_easting_l93=bounds[2],
+        max_northing_l93=bounds[3],
+        min_east_m=bounds[0] - origin[0],
+        max_east_m=bounds[2] - origin[0],
+        min_north_m=bounds[1] - origin[1],
+        max_north_m=bounds[3] - origin[1],
+        min_up_m=0.0,
+        max_up_m=maximum_height - source_height,
+    )
+
+
+def _validate_omniverse_blob_package(
+    *,
+    zone_id: str,
+    revision: int,
+    payload: AdminSpatialPackageFromBlobRequest,
+    settings: Settings,
+    store: ObjectStore | None,
+    expected_role: str | None,
+) -> ValidatedBlobPackage:
+    object_store = store or build_object_store(settings)
+    storage_key = f"packages/{payload.upload_id}"
+    by_path: dict[str, AdminBlobObjectReference] = {}
+    total_size_bytes = 0
+    for item in payload.objects:
+        path = _safe_path(item.path)
+        if path in by_path:
+            raise BadRequestError("duplicate_blob_path", "A Blob path is declared twice.")
+        if item.pathname != object_store.pathname_for(f"{storage_key}/{path}"):
+            raise BadRequestError("blob_path_mismatch", "A Blob object escaped its upload grant.")
+        if item.content_type != _content_type(path):
+            raise BadRequestError(
+                "unexpected_blob_content_type", "A Blob object has an unexpected content type."
+            )
+        if item.size_bytes > settings.zone_upload_max_bytes:
+            raise BadRequestError("package_file_too_large", "A package file exceeds the limit.")
+        total_size_bytes += item.size_bytes
+        if total_size_bytes > settings.zone_upload_max_unpacked_bytes:
+            raise BadRequestError("package_too_large", "The package exceeds the configured limit.")
+        by_path[path] = item
+
+    contract_paths = {
+        path
+        for path in (_OMNIVERSE_MAP_CONTRACT, _OMNIVERSE_PERIMETER_CONTRACT)
+        if path in by_path
+    }
+    if not _OMNIVERSE_COMMON_PATHS.issubset(by_path) or len(contract_paths) != 1:
+        raise BadRequestError(
+            "missing_package_metadata",
+            "An OpenUSD package requires manifest.json, dependency-inventory.json "
+            "and one role contract.",
+        )
+    contract_path = next(iter(contract_paths))
+    role = "omniverse_map" if contract_path == _OMNIVERSE_MAP_CONTRACT else "omniverse_perimeter"
+    if expected_role == "map" and role != "omniverse_map":
+        raise BadRequestError("unexpected_package_role", "The map upload requires a map package.")
+    if expected_role == "perimeter" and role != "omniverse_perimeter":
+        raise BadRequestError(
+            "unexpected_package_role", "The perimeter upload requires a perimeter package."
+        )
+
+    metadata = _list_objects(
+        object_store, storage_key, limit=settings.zone_upload_max_files + 1
+    )
+    if len(metadata) > settings.zone_upload_max_files:
+        raise BadRequestError("too_many_package_files", "The package contains too many files.")
+    if set(metadata) != set(by_path):
+        raise BadRequestError(
+            "missing_blob_object",
+            "The declared Blob objects do not match the stored package inventory.",
+        )
+    metadata_paths = {"manifest.json", "dependency-inventory.json", contract_path}
+    for path in metadata_paths:
+        try:
+            metadata[path] = object_store.head(
+                object_store.uri_for(f"{storage_key}/{path}")
+            )
+        except ObjectStorageError as exc:
+            raise BadRequestError(
+                "missing_blob_object", "The package metadata is inaccessible."
+            ) from exc
+    for path, item in by_path.items():
+        actual = metadata[path]
+        if (
+            actual.pathname != item.pathname
+            or actual.size_bytes != item.size_bytes
+            or (actual.content_type is not None and actual.content_type != item.content_type)
+        ):
+            raise BadRequestError(
+                "blob_metadata_mismatch", "A Blob object does not match its declaration."
+            )
+
+    manifest_raw, manifest = _read_small_json(
+        object_store,
+        storage_key=storage_key,
+        path="manifest.json",
+        declared=by_path["manifest.json"],
+        settings=settings,
+    )
+    inventory_raw, inventory = _read_small_json(
+        object_store,
+        storage_key=storage_key,
+        path="dependency-inventory.json",
+        declared=by_path["dependency-inventory.json"],
+        settings=settings,
+    )
+    contract_raw, contract = _read_small_json(
+        object_store,
+        storage_key=storage_key,
+        path=contract_path,
+        declared=by_path[contract_path],
+        settings=settings,
+    )
+    inventory_sha256 = hashlib.sha256(inventory_raw).hexdigest()
+    manifest_sha256 = hashlib.sha256(manifest_raw).hexdigest()
+    inventory_reference = manifest.get("dependency_inventory")
+    if not isinstance(inventory_reference, dict):
+        raise BadRequestError("invalid_package_manifest", "The dependency inventory is missing.")
+    if (
+        inventory_reference.get("path") != "dependency-inventory.json"
+        or _sha256(inventory_reference.get("sha256"), label="dependency inventory")
+        != inventory_sha256
+    ):
+        raise BadRequestError(
+            "dependency_inventory_digest_mismatch",
+            "dependency-inventory.json does not match manifest.json.",
+        )
+    assets = _omniverse_inventory(inventory)
+    expected_paths = metadata_paths.union(item["path"] for item in assets)
+    if set(by_path) != expected_paths:
+        raise BadRequestError(
+            "package_inventory_mismatch",
+            "The OpenUSD package and dependency inventory do not match exactly.",
+        )
+    if inventory_reference.get("file_count") != len(assets):
+        raise BadRequestError(
+            "package_inventory_mismatch", "The manifest file count is inconsistent."
+        )
+    for inventory_item in assets:
+        if by_path[inventory_item["path"]].size_bytes != inventory_item["size_bytes"]:
+            raise BadRequestError(
+                "package_asset_size_mismatch", "An OpenUSD dependency has an unexpected size."
+            )
+
+    if contract.get("contract_status") != "active" or manifest.get("status") != "active":
+        raise BadRequestError(
+            "inactive_package_contract", "Only an active contract can be uploaded."
+        )
+    contract_sha256 = hashlib.sha256(contract_raw).hexdigest()
+    package_revision: int
+    acceptance_sha256: str
+    state_count: int | None = None
+    base_map: dict[str, Any] | None = None
+    spatial_profile: ValidatedSpatialProfile | None = None
+
+    if role == "omniverse_map":
+        package = contract.get("package")
+        release = contract.get("release")
+        simulation = contract.get("simulation")
+        if (
+            contract.get("schema") != "fireviewer.omniverse-map-upload-contract.v1"
+            or manifest.get("schema") != "fireviewer.omniverse-pure-map-package.v1"
+            or not isinstance(package, dict)
+            or not isinstance(release, dict)
+            or release.get("upload_allowed") is not True
+            or release.get("automatic_publication") is not False
+            or not isinstance(simulation, dict)
+            or any(bool(value) for value in simulation.values())
+        ):
+            raise BadRequestError("invalid_map_contract", "The Omniverse map contract is invalid.")
+        acceptance_sha256 = _sha256(
+            release.get("acceptance_receipt_sha256"), label="map acceptance"
+        )
+        manifest_acceptance = manifest.get("acceptance")
+        if (
+            not isinstance(manifest_acceptance, dict)
+            or manifest_acceptance.get("decision") != "accepted"
+            or manifest_acceptance.get("sha256") != acceptance_sha256
+        ):
+            raise BadRequestError("map_acceptance_mismatch", "The map acceptance receipt differs.")
+        package_id = package.get("package_id")
+        package_revision = _positive_int(package.get("revision"), label="map revision")
+        entry_path = package.get("entry_stage")
+        entry_sha256 = _sha256(package.get("entry_stage_sha256"), label="map entry stage")
+        if (
+            package.get("manifest_sha256") != manifest_sha256
+            or manifest.get("package_id") != package_id
+            or manifest.get("revision") != package_revision
+            or manifest.get("entry_stage") != entry_path
+            or manifest.get("entry_stage_sha256") != entry_sha256
+        ):
+            raise BadRequestError("map_contract_mismatch", "The map contract and manifest differ.")
+        source_manifest_path = "source-usd/source/package-manifest.json"
+        source_manifest_entry = next(
+            (item for item in assets if item["path"] == source_manifest_path), None
+        )
+        if source_manifest_entry is None:
+            raise BadRequestError(
+                "map_source_manifest_missing", "The map source manifest is not included."
+            )
+        source_manifest_raw, source_manifest = _read_small_json(
+            object_store,
+            storage_key=storage_key,
+            path=source_manifest_path,
+            declared=by_path[source_manifest_path],
+            settings=settings,
+        )
+        if hashlib.sha256(source_manifest_raw).hexdigest() != source_manifest_entry["sha256"]:
+            raise BadRequestError("map_source_manifest_changed", "The source manifest changed.")
+        zones = source_manifest.get("zones")
+        source_zone = zones[0] if isinstance(zones, list) and len(zones) == 1 else None
+        if not isinstance(source_zone, dict) or source_zone.get("zone_id") != zone_id:
+            raise BadRequestError(
+                "package_zone_mismatch", "The map source does not target the requested zone."
+            )
+        source_catalog_reference = source_manifest.get("catalog")
+        if not isinstance(source_catalog_reference, dict):
+            raise BadRequestError("map_source_catalog_missing", "The source catalog is missing.")
+        source_catalog_path = "source-usd/source/catalog.json"
+        source_catalog_entry = next(
+            (item for item in assets if item["path"] == source_catalog_path), None
+        )
+        if source_catalog_entry is None:
+            raise BadRequestError(
+                "map_source_catalog_missing", "The source catalog is not included."
+            )
+        source_catalog_raw, source_catalog = _read_small_json(
+            object_store,
+            storage_key=storage_key,
+            path=source_catalog_path,
+            declared=by_path[source_catalog_path],
+            settings=settings,
+        )
+        source_catalog_sha256 = hashlib.sha256(source_catalog_raw).hexdigest()
+        if (
+            source_catalog_sha256 != source_catalog_entry["sha256"]
+            or source_catalog_reference.get("path") != "catalog.json"
+            or source_catalog_reference.get("sha256") != source_catalog_sha256
+        ):
+            raise BadRequestError("map_source_catalog_changed", "The source catalog changed.")
+        spatial_profile = _omniverse_spatial_profile(
+            contract=contract, source_catalog=source_catalog
+        )
+    else:
+        package = contract.get("layer_package")
+        release = contract.get("release")
+        progression = contract.get("progression")
+        base_contract = contract.get("base_map")
+        manifest_base = manifest.get("base_map")
+        if (
+            contract.get("schema")
+            != "fireviewer.omniverse-progressive-perimeter-layer-contract.v1"
+            or manifest.get("schema")
+            != "fireviewer.omniverse-progressive-perimeter-package.v1"
+            or not isinstance(package, dict)
+            or not isinstance(release, dict)
+            or release.get("layer_attachment_allowed") is not True
+            or release.get("automatic_publication") is not False
+            or not isinstance(progression, dict)
+            or progression.get("layer_crs") != "EPSG:2154"
+            or not isinstance(base_contract, dict)
+            or not isinstance(manifest_base, dict)
+        ):
+            raise BadRequestError(
+                "invalid_perimeter_contract", "The Omniverse perimeter contract is invalid."
+            )
+        acceptance_sha256 = _sha256(
+            release.get("acceptance_receipt_sha256"), label="perimeter acceptance"
+        )
+        manifest_acceptance = manifest.get("acceptance")
+        if (
+            not isinstance(manifest_acceptance, dict)
+            or manifest_acceptance.get("decision") != "accepted"
+            or manifest_acceptance.get("sha256") != acceptance_sha256
+        ):
+            raise BadRequestError(
+                "perimeter_acceptance_mismatch", "The perimeter acceptance receipt differs."
+            )
+        state_count = _positive_int(progression.get("state_count"), label="perimeter states")
+        records = progression.get("state_records")
+        if not isinstance(records, list) or len(records) != state_count:
+            raise BadRequestError(
+                "perimeter_state_count_mismatch", "The perimeter state list is incomplete."
+            )
+        manifest_states = manifest.get("states")
+        if not isinstance(manifest_states, list) or len(manifest_states) != state_count:
+            raise BadRequestError(
+                "perimeter_state_count_mismatch", "The perimeter manifest is incomplete."
+            )
+        previous_valid_at = ""
+        for index, record in enumerate(records, start=1):
+            if not isinstance(record, dict):
+                raise BadRequestError(
+                    "invalid_perimeter_state", "A perimeter state record is invalid."
+                )
+            state_path_value = record.get("layer_path")
+            state_path = (
+                _safe_path(state_path_value) if isinstance(state_path_value, str) else ""
+            )
+            state_sha256 = _sha256(
+                record.get("layer_sha256"), label=f"perimeter state {index}"
+            )
+            state_entry = next(
+                (item for item in assets if item["path"] == state_path), None
+            )
+            valid_at = record.get("valid_at")
+            if (
+                record.get("append_order") != index
+                or state_entry is None
+                or state_entry["sha256"] != state_sha256
+                or not isinstance(valid_at, str)
+                or valid_at <= previous_valid_at
+            ):
+                raise BadRequestError(
+                    "invalid_perimeter_state",
+                    "Perimeter states must be complete, ordered and match the inventory.",
+                )
+            manifest_state = manifest_states[index - 1]
+            if (
+                not isinstance(manifest_state, dict)
+                or manifest_state.get("append_order") != index
+                or manifest_state.get("layer_path") != state_path
+                or manifest_state.get("layer_sha256") != state_sha256
+                or manifest_state.get("valid_at") != valid_at
+            ):
+                raise BadRequestError(
+                    "perimeter_state_mismatch",
+                    "The perimeter contract and manifest states differ.",
+                )
+            previous_valid_at = valid_at
+        package_id = package.get("layer_package_id")
+        package_revision = _positive_int(package.get("revision"), label="perimeter revision")
+        entry_path = package.get("entry_layer")
+        entry_sha256 = _sha256(package.get("entry_layer_sha256"), label="perimeter entry")
+        if (
+            package.get("manifest_sha256") != manifest_sha256
+            or manifest.get("layer_package_id") != package_id
+            or manifest.get("revision") != package_revision
+            or manifest.get("entry_layer") != entry_path
+            or manifest.get("entry_layer_sha256") != entry_sha256
+        ):
+            raise BadRequestError(
+                "perimeter_contract_mismatch", "The perimeter contract and manifest differ."
+            )
+        base_map = {
+            "package_id": base_contract.get("package_id"),
+            "revision": _positive_int(base_contract.get("revision"), label="base map revision"),
+            "contract_sha256": _sha256(
+                base_contract.get("contract_record_sha256"), label="base map contract"
+            ),
+            "acceptance_receipt_sha256": _sha256(
+                base_contract.get("acceptance_receipt_sha256"), label="base map acceptance"
+            ),
+            "horizontal_crs": progression.get("layer_crs"),
+        }
+        if (
+            manifest_base.get("package_id") != base_map["package_id"]
+            or manifest_base.get("revision") != base_map["revision"]
+            or manifest_base.get("contract_sha256") != base_map["contract_sha256"]
+            or manifest_base.get("acceptance_receipt_sha256")
+            != base_map["acceptance_receipt_sha256"]
+            or revision != base_map["revision"]
+        ):
+            raise BadRequestError(
+                "perimeter_base_map_mismatch", "The perimeter does not target this map revision."
+            )
+
+    acceptance_path = manifest_acceptance.get("receipt")
+    acceptance_entry = next(
+        (item for item in assets if item["path"] == acceptance_path), None
+    )
+    if acceptance_entry is None or acceptance_entry["sha256"] != acceptance_sha256:
+        raise BadRequestError(
+            "acceptance_receipt_mismatch", "The accepted package receipt is missing or changed."
+        )
+    if not isinstance(package_id, str) or not _PACKAGE_ID_RE.fullmatch(package_id):
+        raise BadRequestError("invalid_package_id", "The OpenUSD package id is invalid.")
+    if package_id != payload.package_id:
+        raise BadRequestError("package_id_mismatch", "The requested package id differs.")
+    if not isinstance(entry_path, str):
+        raise BadRequestError("package_entry_missing", "The OpenUSD entry stage is missing.")
+    entry = next((item for item in assets if item["path"] == entry_path), None)
+    if entry is None or entry["sha256"] != entry_sha256:
+        raise BadRequestError("package_entry_mismatch", "The OpenUSD entry stage differs.")
+
+    return ValidatedBlobPackage(
+        upload_id=payload.upload_id,
+        package_id=package_id,
+        storage_key=storage_key,
+        manifest_sha256=manifest_sha256,
+        manifest_size_bytes=len(manifest_raw),
+        catalog_sha256=inventory_sha256,
+        catalog_size_bytes=len(inventory_raw),
+        asset_catalog=assets,
+        object_count=len(by_path),
+        total_size_bytes=total_size_bytes,
+        spatial_profile=spatial_profile,
+        package_role=role,
+        manifest_path="manifest.json",
+        contract_path=contract_path,
+        contract_sha256=contract_sha256,
+        acceptance_sha256=acceptance_sha256,
+        package_revision=package_revision,
+        state_count=state_count,
+        base_map=base_map,
+    )
+
+
 def validate_blob_package(
     *,
     zone_id: str,
@@ -358,7 +884,22 @@ def validate_blob_package(
     payload: AdminSpatialPackageFromBlobRequest,
     settings: Settings,
     store: ObjectStore | None = None,
+    expected_role: str | None = None,
 ) -> ValidatedBlobPackage:
+    object_paths = {item.path for item in payload.objects}
+    if _OMNIVERSE_COMMON_PATHS.issubset(object_paths):
+        return _validate_omniverse_blob_package(
+            zone_id=zone_id,
+            revision=revision,
+            payload=payload,
+            settings=settings,
+            store=store,
+            expected_role=expected_role,
+        )
+    if expected_role == "perimeter":
+        raise BadRequestError(
+            "unexpected_package_role", "The perimeter upload requires an OpenUSD perimeter package."
+        )
     object_store = store or build_object_store(settings)
     if len(payload.objects) > settings.zone_upload_max_files:
         raise BadRequestError("too_many_package_files", "The package declares too many files.")
@@ -573,6 +1114,18 @@ def _kind_and_media_type(path: str) -> tuple[SpatialPackageFileKind, str]:
         return SpatialPackageFileKind.FWTILE, "application/vnd.fireviewer.tile"
     if suffix == ".fwterrain":
         return SpatialPackageFileKind.FWTERRAIN, "application/vnd.fireviewer.terrain"
+    if suffix == ".json":
+        return SpatialPackageFileKind.JSON, "application/json"
+    if suffix in {".usd", ".usda", ".usdc"}:
+        return SpatialPackageFileKind.OPENUSD, "model/vnd.usd"
+    if suffix == ".usdz":
+        return SpatialPackageFileKind.OPENUSD, "model/vnd.usdz+zip"
+    if suffix == ".hdr":
+        return SpatialPackageFileKind.AUXILIARY, "image/vnd.radiance"
+    if suffix == ".jgw":
+        return SpatialPackageFileKind.AUXILIARY, "text/plain"
+    if suffix == ".npz":
+        return SpatialPackageFileKind.AUXILIARY, "application/octet-stream"
     raise BadRequestError("unsupported_package_file_type", "The package asset type is unsupported.")
 
 
@@ -601,7 +1154,7 @@ def persist_validated_blob_package(
     store = build_object_store(settings)
     package = SpatialPackage(
         package_id=validated.package_id,
-        manifest_uri=store.uri_for(f"{validated.storage_key}/package-manifest.json"),
+        manifest_uri=store.uri_for(f"{validated.storage_key}/{validated.manifest_path}"),
         manifest_sha256=validated.manifest_sha256,
         manifest_size_bytes=validated.manifest_size_bytes,
         storage_uri=store.uri_for(validated.storage_key),
@@ -612,12 +1165,20 @@ def persist_validated_blob_package(
             "revision": revision,
             "catalog_sha256": validated.catalog_sha256,
             "catalog_size_bytes": validated.catalog_size_bytes,
+            "package_role": validated.package_role,
+            "manifest_path": validated.manifest_path,
+            "contract_path": validated.contract_path,
+            "contract_sha256": validated.contract_sha256,
+            "acceptance_sha256": validated.acceptance_sha256,
+            "package_revision": validated.package_revision,
+            "state_count": validated.state_count,
+            "base_map": validated.base_map,
         },
         verification_report={
             "status": "finalized_from_blob",
             "summary": (
-                "Stored Blob pathnames and sizes match the package catalog; declared content "
-                "types match supported file extensions."
+                "Stored Blob pathnames and sizes match the immutable package inventory; "
+                "declared content types match supported file extensions."
             ),
             "object_count": validated.object_count,
         },

@@ -338,7 +338,10 @@
         "PNG",
         "GLB",
         "FWTILE",
-        "FWTERRAIN"
+        "FWTERRAIN",
+        "JSON",
+        "OPENUSD",
+        "AUXILIARY"
       ],
       "title": "SpatialPackageFileKind",
       "type": "string"

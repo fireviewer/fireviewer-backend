@@ -368,6 +368,22 @@ def _create_verified_publication(
 
 
 def _assert_required_preview_files(package: SpatialPackage) -> None:
+    if package.provenance.get("package_role") == "omniverse_map":
+        entry_path = next(
+            (
+                str(item.provenance.get("catalog_path"))
+                for item in package.files
+                if item.kind == SpatialPackageFileKind.OPENUSD
+                and item.provenance.get("catalog_path") == "map.usda"
+            ),
+            None,
+        )
+        if entry_path is None:
+            raise ConflictError(
+                "spatial_package_missing_openusd_stage",
+                "The Omniverse map package is missing map.usda.",
+            )
+        return
     kinds = {file.kind for file in package.files}
     tiled_kinds = {
         SpatialPackageFileKind.FWTILE,
@@ -408,7 +424,9 @@ def make_spatial_package_previewable(
         "scope": "registered-metadata-and-immutable-inventory",
         "checks": ["manifest-metadata", "immutable-file-inventory", "preview-assets"],
         "scene_kind": (
-            "remote_tiles"
+            "omniverse_usd"
+            if package.provenance.get("package_role") == "omniverse_map"
+            else "remote_tiles"
             if {
                 SpatialPackageFileKind.FWTILE,
                 SpatialPackageFileKind.FWTERRAIN,

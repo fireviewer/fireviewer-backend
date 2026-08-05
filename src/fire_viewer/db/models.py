@@ -1075,10 +1075,10 @@ class SpatialZoneRevision(Base):
 
 
 class SpatialPackage(Base):
-    """Immutable admin registry entry for a Unity-produced spatial package.
+    """Immutable admin registry entry for a spatial package.
 
     The package stores controlled object locations, hashes and verification
-    metadata only. COG/PNG/GLB binaries stay outside SQLite.
+    metadata only. Binary payloads stay outside the relational database.
     """
 
     __tablename__ = "spatial_package"
@@ -1172,8 +1172,46 @@ class SpatialPackageFile(Base):
             "OR (kind = 'PNG' AND media_type = 'image/png') "
             "OR (kind = 'GLB' AND media_type IN ('model/gltf-binary', 'application/octet-stream')) "
             "OR (kind = 'FWTILE' AND media_type = 'application/vnd.fireviewer.tile') "
-            "OR (kind = 'FWTERRAIN' AND media_type = 'application/vnd.fireviewer.terrain')",
+            "OR (kind = 'FWTERRAIN' AND media_type = 'application/vnd.fireviewer.terrain') "
+            "OR (kind = 'JSON' AND media_type = 'application/json') "
+            "OR (kind = 'OPENUSD' AND media_type IN "
+            "('model/vnd.usd', 'model/vnd.usdz+zip', 'application/octet-stream')) "
+            "OR (kind = 'AUXILIARY' AND media_type IN "
+            "('application/octet-stream', 'image/vnd.radiance', 'text/plain'))",
             name="ck_spatial_package_file_media_type",
+        ),
+    )
+
+
+class IncidentPerimeterPackage(Base):
+    """Explicit attachment of one immutable perimeter layer to an incident map."""
+
+    __tablename__ = "incident_perimeter_package"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    incident_id: Mapped[int] = mapped_column(
+        ForeignKey("incident_series.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    spatial_package_id: Mapped[int] = mapped_column(
+        ForeignKey("spatial_package.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    base_spatial_package_id: Mapped[int] = mapped_column(
+        ForeignKey("spatial_package.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "spatial_package_id <> base_spatial_package_id",
+            name="ck_incident_perimeter_package_distinct_base",
+        ),
+        UniqueConstraint(
+            "incident_id",
+            "spatial_package_id",
+            name="uq_incident_perimeter_package_attachment",
         ),
     )
 

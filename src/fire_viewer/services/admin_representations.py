@@ -124,7 +124,8 @@ def attach_incident_package_in_transaction(
             "The package is not bound to a spatial zone revision.",
         )
 
-    tiled_scene = _is_tiled_scene(package.files)
+    omniverse_scene = package.provenance.get("package_role") == "omniverse_map"
+    tiled_scene = omniverse_scene or _is_tiled_scene(package.files)
     profiles = {} if tiled_scene else _profiles(package.files)
     primary_profile: str | None = None
     if profiles:
@@ -257,7 +258,13 @@ def attach_incident_package_in_transaction(
         payload={
             "profiles": sorted(assets),
             "primary_profile": primary_profile,
-            "scene_kind": "tiled" if tiled_scene else "single_asset",
+            "scene_kind": (
+                "omniverse_usd"
+                if omniverse_scene
+                else "tiled"
+                if tiled_scene
+                else "single_asset"
+            ),
         },
     )
     return response

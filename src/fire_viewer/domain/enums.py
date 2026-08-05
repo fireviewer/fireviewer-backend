@@ -91,6 +91,9 @@ class SpatialPackageFileKind(StrEnum):
     GLB = "GLB"
     FWTILE = "FWTILE"
     FWTERRAIN = "FWTERRAIN"
+    JSON = "JSON"
+    OPENUSD = "OPENUSD"
+    AUXILIARY = "AUXILIARY"
 
 
 class ZoneUploadState(StrEnum):

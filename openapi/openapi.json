@@ -5810,6 +5810,73 @@
         }
       }
     },
+    "/api/v2/admin/incidents/{fire_id}/perimeter-package/from-blob": {
+      "post": {
+        "tags": [
+          "admin-v2"
+        ],
+        "summary": "Finalize Incident Perimeter Package From Blob",
+        "operationId": "finalize_incident_perimeter_package_from_blob_api_v2_admin_incidents__fire_id__perimeter_package_from_blob_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "fire_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^FR-[0-9A-Z]{2,3}-[0-9]{5}$",
+              "title": "Fire Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminIncidentSpatialPackageFromBlobRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminIncidentPerimeterPackageImportResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/admin/packages/{package_id}/files/{file_id}": {
       "get": {
         "tags": [
@@ -11170,6 +11237,80 @@
           "fire_id"
         ],
         "title": "AdminIncidentOperationalInformationResponse"
+      },
+      "AdminIncidentPerimeterPackageImportResponse": {
+        "properties": {
+          "fire_id": {
+            "type": "string",
+            "title": "Fire Id"
+          },
+          "package_id": {
+            "type": "string",
+            "title": "Package Id"
+          },
+          "package_state": {
+            "$ref": "#/components/schemas/SpatialPackageState"
+          },
+          "base_map_package_id": {
+            "type": "string",
+            "title": "Base Map Package Id"
+          },
+          "zone_id": {
+            "type": "string",
+            "title": "Zone Id"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Revision"
+          },
+          "incident_version": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Incident Version"
+          },
+          "object_count": {
+            "type": "integer",
+            "minimum": 3.0,
+            "title": "Object Count"
+          },
+          "total_size_bytes": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Total Size Bytes"
+          },
+          "asset_count": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Asset Count"
+          },
+          "state_count": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "State Count"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "fire_id",
+          "package_id",
+          "package_state",
+          "base_map_package_id",
+          "zone_id",
+          "revision",
+          "incident_version",
+          "object_count",
+          "total_size_bytes",
+          "asset_count",
+          "state_count",
+          "trace_id"
+        ],
+        "title": "AdminIncidentPerimeterPackageImportResponse"
       },
       "AdminIncidentPipelineJob": {
         "properties": {
@@ -23146,7 +23287,10 @@
           "PNG",
           "GLB",
           "FWTILE",
-          "FWTERRAIN"
+          "FWTERRAIN",
+          "JSON",
+          "OPENUSD",
+          "AUXILIARY"
         ],
         "title": "SpatialPackageFileKind"
       },

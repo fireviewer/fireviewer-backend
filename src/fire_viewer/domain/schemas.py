@@ -1628,6 +1628,21 @@ class AdminIncidentSpatialPackageImportResponse(StrictModel):
     trace_id: str
 
 
+class AdminIncidentPerimeterPackageImportResponse(StrictModel):
+    fire_id: str
+    package_id: str
+    package_state: SpatialPackageState
+    base_map_package_id: str
+    zone_id: str
+    revision: int = Field(ge=1)
+    incident_version: int = Field(ge=1)
+    object_count: int = Field(ge=3)
+    total_size_bytes: int = Field(gt=0)
+    asset_count: int = Field(ge=1)
+    state_count: int = Field(ge=1)
+    trace_id: str
+
+
 class AdminSpatialPackageRecoveryRequest(StrictModel):
     upload_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     package_id: str = Field(min_length=3, max_length=96, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")

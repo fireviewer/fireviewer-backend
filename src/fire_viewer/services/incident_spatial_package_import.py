@@ -9,17 +9,22 @@ from sqlalchemy.orm import Session, selectinload
 
 from fire_viewer.core.config import Settings
 from fire_viewer.core.security import Actor
+from fire_viewer.core.time import utcnow
 from fire_viewer.db.models import (
+    IncidentPerimeterPackage,
     IncidentSeries,
+    ManifestRevision,
+    SpatialPackage,
     SpatialZone,
     SpatialZoneRevision,
     ZoneProfile,
 )
 from fire_viewer.db.transactions import begin_write_transaction
-from fire_viewer.domain.enums import ZoneVisibility
+from fire_viewer.domain.enums import SpatialPackageState, ZoneVisibility
 from fire_viewer.domain.errors import BadRequestError, ConflictError, NotFoundError
 from fire_viewer.domain.hashing import sha256_hex
 from fire_viewer.domain.schemas import (
+    AdminIncidentPerimeterPackageImportResponse,
     AdminIncidentRepresentationAttachRequest,
     AdminIncidentSpatialPackageFromBlobRequest,
     AdminIncidentSpatialPackageImportResponse,
@@ -54,6 +59,12 @@ from fire_viewer.services.spatial_package_publication import (
 @dataclass(frozen=True, slots=True)
 class IncidentSpatialPackageImportOutcome:
     response: AdminIncidentSpatialPackageImportResponse
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class IncidentPerimeterPackageImportOutcome:
+    response: AdminIncidentPerimeterPackageImportResponse
     replayed: bool
 
 
@@ -307,3 +318,165 @@ def import_incident_spatial_package(
     )
     session.commit()
     return IncidentSpatialPackageImportOutcome(response, False)
+
+
+def import_incident_perimeter_package(
+    session: Session,
+    *,
+    fire_id: str,
+    payload: AdminIncidentSpatialPackageFromBlobRequest,
+    validated: ValidatedBlobPackage,
+    idempotency_key: str,
+    actor: Actor,
+    trace_id: str,
+    settings: Settings,
+) -> IncidentPerimeterPackageImportOutcome:
+    """Attach one verified OpenUSD perimeter package without replacing the map."""
+
+    endpoint = f"POST /api/v2/admin/incidents/{fire_id}/perimeter-package/from-blob"
+    request_hash = sha256_hex(
+        {
+            "actor_id": actor.actor_id,
+            "fire_id": fire_id,
+            "payload": payload.model_dump(mode="json"),
+        }
+    )
+    begin_write_transaction(session)
+    replay = find_replay(
+        session,
+        endpoint=endpoint,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+    )
+    if replay:
+        session.rollback()
+        return IncidentPerimeterPackageImportOutcome(
+            AdminIncidentPerimeterPackageImportResponse.model_validate(replay.response_body),
+            True,
+        )
+    if validated.package_role != "omniverse_perimeter" or validated.base_map is None:
+        raise BadRequestError(
+            "unexpected_package_role", "A perimeter package is required for this attachment."
+        )
+    incident = session.execute(
+        select(IncidentSeries)
+        .where(IncidentSeries.fire_id == fire_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if incident is None:
+        raise NotFoundError("incident", fire_id)
+    if incident.version != payload.expected_incident_version:
+        raise ConflictError(
+            "stale_incident_version",
+            "The incident was modified by another operation.",
+            extra={"current_version": incident.version},
+        )
+    current_manifest = session.execute(
+        select(ManifestRevision)
+        .where(
+            ManifestRevision.incident_id == incident.id,
+            ManifestRevision.is_current.is_(True),
+        )
+        .options(
+            selectinload(ManifestRevision.package).selectinload(SpatialPackage.files),
+            selectinload(ManifestRevision.spatial_zone_revision).selectinload(
+                SpatialZoneRevision.zone
+            ),
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    base_package = current_manifest.package if current_manifest is not None else None
+    base_revision = (
+        current_manifest.spatial_zone_revision if current_manifest is not None else None
+    )
+    base_map = validated.base_map
+    if (
+        base_package is None
+        or base_revision is None
+        or base_package.package_id != base_map["package_id"]
+        or base_package.provenance.get("package_role") != "omniverse_map"
+        or base_package.provenance.get("package_revision") != base_map["revision"]
+        or base_package.provenance.get("contract_sha256") != base_map["contract_sha256"]
+        or base_package.provenance.get("acceptance_sha256")
+        != base_map["acceptance_receipt_sha256"]
+        or base_revision.zone.zone_id != payload.zone_id
+        or base_revision.revision != payload.revision
+        or base_revision.horizontal_crs != base_map["horizontal_crs"]
+    ):
+        raise ConflictError(
+            "perimeter_base_map_not_attached",
+            "The perimeter contract does not match the incident's current Omniverse map.",
+        )
+    package = persist_validated_blob_package(
+        session,
+        zone_id=payload.zone_id,
+        revision=payload.revision,
+        validated=validated,
+        actor=actor,
+        settings=settings,
+    )
+    package.spatial_zone_revision_id = base_revision.id
+    package.state = SpatialPackageState.VERIFIED
+    package.verified_at = utcnow()
+    package.verification_report = {
+        **package.verification_report,
+        "status": "passed",
+        "scope": "separate-openusd-perimeter-layer",
+        "checks": [
+            "immutable-file-inventory",
+            "active-contract",
+            "base-map-identifier",
+            "base-map-contract-hash",
+            "base-map-acceptance-hash",
+            "spatial-reference",
+            "ordered-timeline",
+        ],
+        "base_map_package_id": base_package.package_id,
+        "state_count": validated.state_count,
+    }
+    session.add(
+        IncidentPerimeterPackage(
+            incident_id=incident.id,
+            spatial_package_id=package.id,
+            base_spatial_package_id=base_package.id,
+            created_by=actor.actor_id,
+        )
+    )
+    session.flush()
+    response = AdminIncidentPerimeterPackageImportResponse(
+        fire_id=incident.fire_id,
+        package_id=package.package_id,
+        package_state=package.state,
+        base_map_package_id=base_package.package_id,
+        zone_id=payload.zone_id,
+        revision=payload.revision,
+        incident_version=incident.version,
+        object_count=validated.object_count,
+        total_size_bytes=validated.total_size_bytes,
+        asset_count=len(package.files),
+        state_count=validated.state_count or 0,
+        trace_id=trace_id,
+    )
+    record_operator_audit(
+        session,
+        actor=actor,
+        action="incident.perimeter_package.attached",
+        target_type="incident_series",
+        target_id=incident.fire_id,
+        reason=payload.reason,
+        trace_id=trace_id,
+        after=response.model_dump(mode="json"),
+        payload={"base_map_package_id": base_package.package_id},
+    )
+    store_response(
+        session,
+        endpoint=endpoint,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        response_status=201,
+        response_body=response.model_dump(mode="json"),
+        trace_id=trace_id,
+        settings=settings,
+    )
+    session.commit()
+    return IncidentPerimeterPackageImportOutcome(response, False)

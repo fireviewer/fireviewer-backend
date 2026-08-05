@@ -40,6 +40,13 @@ def _content_type(path: Path) -> str:
         ".glb": "model/gltf-binary",
         ".fwtile": "application/vnd.fireviewer.tile",
         ".fwterrain": "application/vnd.fireviewer.terrain",
+        ".usd": "model/vnd.usd",
+        ".usda": "model/vnd.usd",
+        ".usdc": "model/vnd.usd",
+        ".usdz": "model/vnd.usdz+zip",
+        ".hdr": "image/vnd.radiance",
+        ".npz": "application/octet-stream",
+        ".jgw": "text/plain",
     }
     return (
         explicit.get(path.suffix.casefold())

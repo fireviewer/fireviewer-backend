@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from fire_viewer.db.models import (
     AuditEvent,
+    IncidentPerimeterPackage,
     ManifestRevision,
     SpatialPackage,
     SpatialPackageFile,
@@ -228,7 +229,226 @@ def _content_type(path: str) -> str:
         ".glb": "model/gltf-binary",
         ".fwtile": "application/vnd.fireviewer.tile",
         ".fwterrain": "application/vnd.fireviewer.terrain",
+        ".usda": "model/vnd.usd",
+        ".usdc": "model/vnd.usd",
     }[Path(path).suffix]
+
+
+def _json_bytes(value: dict[str, Any]) -> bytes:
+    return json.dumps(value, separators=(",", ":")).encode()
+
+
+def _omniverse_map_documents(
+    *, package_id: str, zone_id: str, revision: int, origin_lon: float, origin_lat: float
+) -> dict[str, bytes]:
+    origin_easting, origin_northing = wgs84_to_lambert93(origin_lon, origin_lat)
+    acceptance = _json_bytes({"decision": "accepted", "review": "test"})
+    entry = b"#usda 1.0\ndef Xform \"World\" {}\n"
+    source_catalog = _json_bytes(
+        {
+            "spatial_contract": {
+                "grid_crs": "EPSG:2154",
+                "vertical_datum": "NGF-IGN69",
+                "height_origin_ngf_ign69_m": 410.0,
+                "height_maximum_ngf_ign69_m": 765.0,
+            }
+        }
+    )
+    source_manifest = _json_bytes(
+        {
+            "package_id": "source-map-r1",
+            "catalog": {
+                "path": "catalog.json",
+                "sha256": hashlib.sha256(source_catalog).hexdigest(),
+                "byte_count": len(source_catalog),
+            },
+            "zones": [{"zone_id": zone_id, "revision_id": "R1"}],
+        }
+    )
+    assets = {
+        "acceptance/map-acceptance.json": acceptance,
+        "map.usda": entry,
+        "source-usd/source/catalog.json": source_catalog,
+        "source-usd/source/package-manifest.json": source_manifest,
+    }
+    inventory = _json_bytes(
+        {
+            "file_count": len(assets),
+            "files": [
+                {
+                    "path": path,
+                    "byte_count": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+                for path, content in assets.items()
+            ],
+        }
+    )
+    manifest = _json_bytes(
+        {
+            "schema": "fireviewer.omniverse-pure-map-package.v1",
+            "status": "active",
+            "package_id": package_id,
+            "revision": revision,
+            "entry_stage": "map.usda",
+            "entry_stage_sha256": hashlib.sha256(entry).hexdigest(),
+            "acceptance": {
+                "decision": "accepted",
+                "receipt": "acceptance/map-acceptance.json",
+                "sha256": hashlib.sha256(acceptance).hexdigest(),
+            },
+            "dependency_inventory": {
+                "path": "dependency-inventory.json",
+                "sha256": hashlib.sha256(inventory).hexdigest(),
+                "file_count": len(assets),
+            },
+        }
+    )
+    contract = _json_bytes(
+        {
+            "schema": "fireviewer.omniverse-map-upload-contract.v1",
+            "contract_status": "active",
+            "package": {
+                "package_id": package_id,
+                "revision": revision,
+                "entry_stage": "map.usda",
+                "entry_stage_sha256": hashlib.sha256(entry).hexdigest(),
+                "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+            },
+            "release": {
+                "upload_allowed": True,
+                "automatic_publication": False,
+                "acceptance_receipt_sha256": hashlib.sha256(acceptance).hexdigest(),
+            },
+            "simulation": {
+                "enabled": False,
+                "perimeter_layer_embedded": False,
+                "timeline_present": False,
+            },
+            "spatial_reference": {
+                "bounds_l93_m": [
+                    origin_easting - 500.0,
+                    origin_northing - 500.0,
+                    origin_easting + 500.0,
+                    origin_northing + 500.0,
+                ],
+                "local_origin_l93_m": [origin_easting, origin_northing, 0.0],
+                "horizontal_crs": "EPSG:2154",
+                "vertical_datum": "NGF-IGN69",
+                "up_axis": "Z",
+                "meters_per_unit": 1.0,
+            },
+        }
+    )
+    return {
+        "manifest.json": manifest,
+        "dependency-inventory.json": inventory,
+        "contracts/map-contract.json": contract,
+        **assets,
+    }
+
+
+def _omniverse_perimeter_documents(
+    *, package_id: str, base_map_id: str, base_revision: int, map_contract_sha256: str,
+    map_acceptance_sha256: str,
+) -> dict[str, bytes]:
+    acceptance = _json_bytes({"decision": "accepted", "review": "test"})
+    entry = b"#usda 1.0\ndef Xform \"Perimeters\" {}\n"
+    state = b"PXR-USDC-test-state"
+    assets = {
+        "acceptance/perimeter-acceptance.json": acceptance,
+        "perimeters.usda": entry,
+        "states/perimeter_001.usdc": state,
+    }
+    inventory = _json_bytes(
+        {
+            "file_count": len(assets),
+            "files": [
+                {
+                    "path": path,
+                    "byte_count": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+                for path, content in assets.items()
+            ],
+        }
+    )
+    manifest = _json_bytes(
+        {
+            "schema": "fireviewer.omniverse-progressive-perimeter-package.v1",
+            "status": "active",
+            "layer_package_id": package_id,
+            "revision": 1,
+            "entry_layer": "perimeters.usda",
+            "entry_layer_sha256": hashlib.sha256(entry).hexdigest(),
+            "acceptance": {
+                "decision": "accepted",
+                "receipt": "acceptance/perimeter-acceptance.json",
+                "sha256": hashlib.sha256(acceptance).hexdigest(),
+            },
+            "base_map": {
+                "package_id": base_map_id,
+                "revision": base_revision,
+                "contract_sha256": map_contract_sha256,
+                "acceptance_receipt_sha256": map_acceptance_sha256,
+            },
+            "states": [
+                {
+                    "append_order": 1,
+                    "layer_path": "states/perimeter_001.usdc",
+                    "layer_sha256": hashlib.sha256(state).hexdigest(),
+                    "valid_at": "2026-07-03T18:00:00Z",
+                }
+            ],
+            "dependency_inventory": {
+                "path": "dependency-inventory.json",
+                "sha256": hashlib.sha256(inventory).hexdigest(),
+                "file_count": len(assets),
+            },
+        }
+    )
+    contract = _json_bytes(
+        {
+            "schema": "fireviewer.omniverse-progressive-perimeter-layer-contract.v1",
+            "contract_status": "active",
+            "layer_package": {
+                "layer_package_id": package_id,
+                "revision": 1,
+                "entry_layer": "perimeters.usda",
+                "entry_layer_sha256": hashlib.sha256(entry).hexdigest(),
+                "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+            },
+            "release": {
+                "layer_attachment_allowed": True,
+                "automatic_publication": False,
+                "acceptance_receipt_sha256": hashlib.sha256(acceptance).hexdigest(),
+            },
+            "base_map": {
+                "package_id": base_map_id,
+                "revision": base_revision,
+                "contract_record_sha256": map_contract_sha256,
+                "acceptance_receipt_sha256": map_acceptance_sha256,
+            },
+            "progression": {
+                "layer_crs": "EPSG:2154",
+                "state_count": 1,
+                "state_records": [
+                    {
+                        "append_order": 1,
+                        "layer_path": "states/perimeter_001.usdc",
+                        "layer_sha256": hashlib.sha256(state).hexdigest(),
+                        "valid_at": "2026-07-03T18:00:00Z",
+                    }
+                ],
+            },
+        }
+    )
+    return {
+        "manifest.json": manifest,
+        "dependency-inventory.json": inventory,
+        "contracts/perimeter-contract.json": contract,
+        **assets,
+    }
 
 
 def _stage_blob_objects(
@@ -676,6 +896,115 @@ def test_incident_project_map_import_creates_missing_zone_and_revision(
     )
 
 
+def test_incident_imports_complete_omniverse_map_then_separate_perimeters(
+    client, settings, session, seed_incident
+) -> None:
+    incident, _episode = seed_incident(
+        fire_id="FR-26-00915",
+        sequence=915,
+        lon=5.2601,
+        lat=44.7555,
+        status=IncidentStatus.ACTIVE_CONFIRMED,
+    )
+    map_id = "fireviewer-test-omniverse-map-r1"
+    zone_id = "IMPORT-OMNIVERSE-01"
+    map_upload_id = "4" * 32
+    map_documents = _omniverse_map_documents(
+        package_id=map_id,
+        zone_id=zone_id,
+        revision=1,
+        origin_lon=incident.reference_lon,
+        origin_lat=incident.reference_lat,
+    )
+    map_objects = _stage_documents(settings, map_documents, upload_id=map_upload_id)
+    map_response = client.post(
+        f"/api/v2/admin/incidents/{incident.fire_id}/spatial-package/from-blob",
+        json={
+            "upload_id": map_upload_id,
+            "package_id": map_id,
+            "zone_id": zone_id,
+            "revision": 1,
+            "expected_incident_version": incident.version,
+            "primary_profile": "local",
+            "reason": "Import de la carte Omniverse autonome pour le test d'intégration.",
+            "objects": map_objects,
+        },
+        headers=_headers("incident-omniverse-map-import-0001"),
+    )
+    assert map_response.status_code == 201, map_response.text
+    assert map_response.json()["package_state"] == "PREVIEWABLE"
+    current_version = map_response.json()["incident_version"]
+
+    map_contract_sha256 = hashlib.sha256(
+        map_documents["contracts/map-contract.json"]
+    ).hexdigest()
+    map_acceptance_sha256 = hashlib.sha256(
+        map_documents["acceptance/map-acceptance.json"]
+    ).hexdigest()
+    perimeter_id = "fireviewer-test-perimeters-r1"
+    perimeter_upload_id = "5" * 32
+    perimeter_documents = _omniverse_perimeter_documents(
+        package_id=perimeter_id,
+        base_map_id=map_id,
+        base_revision=1,
+        map_contract_sha256=map_contract_sha256,
+        map_acceptance_sha256=map_acceptance_sha256,
+    )
+    perimeter_objects = _stage_documents(
+        settings, perimeter_documents, upload_id=perimeter_upload_id
+    )
+    perimeter_response = client.post(
+        f"/api/v2/admin/incidents/{incident.fire_id}/perimeter-package/from-blob",
+        json={
+            "upload_id": perimeter_upload_id,
+            "package_id": perimeter_id,
+            "zone_id": zone_id,
+            "revision": 1,
+            "expected_incident_version": current_version,
+            "primary_profile": "local",
+            "reason": "Rattachement séparé du package temporel de périmètres de test.",
+            "objects": perimeter_objects,
+        },
+        headers=_headers("incident-omniverse-perimeter-import-0001"),
+    )
+    assert perimeter_response.status_code == 201, perimeter_response.text
+    assert perimeter_response.json() == {
+        "fire_id": incident.fire_id,
+        "package_id": perimeter_id,
+        "package_state": "VERIFIED",
+        "base_map_package_id": map_id,
+        "zone_id": zone_id,
+        "revision": 1,
+        "incident_version": current_version,
+        "object_count": len(perimeter_documents),
+        "total_size_bytes": sum(map(len, perimeter_documents.values())),
+        "asset_count": 3,
+        "state_count": 1,
+        "trace_id": perimeter_response.json()["trace_id"],
+    }
+    session.expire_all()
+    perimeter_package = session.scalar(
+        select(SpatialPackage).where(SpatialPackage.package_id == perimeter_id)
+    )
+    assert perimeter_package is not None
+    assert perimeter_package.state == SpatialPackageState.VERIFIED
+    assert perimeter_package.provenance["base_map"]["package_id"] == map_id
+    attachment = session.scalar(
+        select(IncidentPerimeterPackage).where(
+            IncidentPerimeterPackage.spatial_package_id == perimeter_package.id
+        )
+    )
+    assert attachment is not None
+    current_manifest = session.scalar(
+        select(ManifestRevision).where(
+            ManifestRevision.incident_id == incident.id,
+            ManifestRevision.is_current.is_(True),
+        )
+    )
+    assert current_manifest is not None
+    assert current_manifest.package.package_id == map_id
+
+
 def test_incident_project_map_import_rolls_back_when_incident_version_is_stale(
     client, settings, session, seed_incident
 ) -> None:
@@ -966,10 +1295,15 @@ def test_admin_grant_issues_a_prefix_limited_vercel_blob_client_token(client, se
         "application/vnd.fireviewer.tile",
         "image/jpeg",
         "image/png",
-        "image/tiff",
-        "image/geotiff",
-        "model/gltf-binary",
-    ]
+            "image/tiff",
+            "image/geotiff",
+            "image/vnd.radiance",
+            "model/gltf-binary",
+            "model/vnd.usd",
+            "model/vnd.usdz+zip",
+            "application/octet-stream",
+            "text/plain",
+        ]
     assert token_payload["addRandomSuffix"] is False
     assert token_payload["allowOverwrite"] is False
     assert token_payload["maximumSizeInBytes"] == settings.zone_upload_max_bytes

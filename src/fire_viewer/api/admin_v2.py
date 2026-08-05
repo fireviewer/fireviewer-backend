@@ -30,6 +30,7 @@ from fire_viewer.domain.schemas import (
     AdminIncidentCreateRequest,
     AdminIncidentCreateResponse,
     AdminIncidentListResponse,
+    AdminIncidentPerimeterPackageImportResponse,
     AdminIncidentRepresentationAttachRequest,
     AdminIncidentRepresentationAttachResponse,
     AdminIncidentSpatialPackageFromBlobRequest,
@@ -51,6 +52,7 @@ from fire_viewer.services.blob_uploads import (
     create_blob_upload_grant,
 )
 from fire_viewer.services.incident_spatial_package_import import (
+    import_incident_perimeter_package,
     import_incident_spatial_package,
 )
 from fire_viewer.services.spatial_package_blob_import import validate_blob_package
@@ -322,8 +324,47 @@ def finalize_incident_spatial_package_from_blob(
         revision=payload.revision,
         payload=payload,
         settings=settings,
+        expected_role="map",
     )
     outcome = import_incident_spatial_package(
+        session,
+        fire_id=fire_id,
+        payload=payload,
+        validated=validated,
+        idempotency_key=idempotency_key,
+        actor=actor,
+        trace_id=trace_id,
+        settings=settings,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Idempotent-Replay"] = "true" if outcome.replayed else "false"
+    return outcome.response
+
+
+@router.post(
+    "/incidents/{fire_id}/perimeter-package/from-blob",
+    response_model=AdminIncidentPerimeterPackageImportResponse,
+    status_code=201,
+)
+def finalize_incident_perimeter_package_from_blob(
+    fire_id: Annotated[str, Path(pattern=r"^FR-[0-9A-Z]{2,3}-[0-9]{5}$")],
+    payload: AdminIncidentSpatialPackageFromBlobRequest,
+    response: Response,
+    actor: ActorDep,
+    session: SessionDep,
+    settings: SettingsDep,
+    trace_id: TraceIdDep,
+    idempotency_key: IdempotencyKeyDep,
+) -> AdminIncidentPerimeterPackageImportResponse:
+    _require_admin(actor)
+    validated = validate_blob_package(
+        zone_id=payload.zone_id,
+        revision=payload.revision,
+        payload=payload,
+        settings=settings,
+        expected_role="perimeter",
+    )
+    outcome = import_incident_perimeter_package(
         session,
         fire_id=fire_id,
         payload=payload,

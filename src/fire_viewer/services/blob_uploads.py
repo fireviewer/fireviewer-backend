@@ -31,7 +31,12 @@ ALLOWED_PACKAGE_CONTENT_TYPES = (
     "image/png",
     "image/tiff",
     "image/geotiff",
+    "image/vnd.radiance",
     "model/gltf-binary",
+    "model/vnd.usd",
+    "model/vnd.usdz+zip",
+    "application/octet-stream",
+    "text/plain",
 )
 ALLOWED_SOURCE_CONTENT_TYPES = (
     "image/jpeg",
@@ -58,7 +63,24 @@ ALLOWED_DAILY_SATELLITE_CONTENT_TYPES = (
 ALLOWED_GALLERY_CONTENT_TYPES = ("image/jpeg", "image/png")
 INCIDENT_GALLERY_MAX_BYTES = 8 * 1_024 * 1_024
 _ALLOWED_SUFFIXES = frozenset(
-    {".json", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".glb", ".fwtile", ".fwterrain"}
+    {
+        ".json",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".tif",
+        ".tiff",
+        ".glb",
+        ".fwtile",
+        ".fwterrain",
+        ".usd",
+        ".usda",
+        ".usdc",
+        ".usdz",
+        ".hdr",
+        ".npz",
+        ".jgw",
+    }
 )
 _ALLOWED_SOURCE_SUFFIXES = frozenset(
     {
